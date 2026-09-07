@@ -87,6 +87,11 @@ export class GameEngine {
         reply_markup: this.lobbyKeyboard(game.id)
       });
       await this.db.setLobbyMessage(game.id, message.message_id);
+      try {
+        await this.bot.telegram.pinChatMessage(chatId, message.message_id, { disable_notification: true });
+      } catch (error) {
+        this.logger.warn("Не удалось закрепить сообщение набора", error);
+      }
       await this.db.recordAudit(chatId, game.id, String(ctx.from.id), "create_game");
     } catch (error) {
       if (isUniqueViolation(error)) await ctx.reply("В этой группе уже открыт набор.");
@@ -105,7 +110,7 @@ export class GameEngine {
       return;
     }
     await ctx.reply("Откройте бота, чтобы получать тайную роль и ночные действия:", {
-      reply_markup: Markup.inlineKeyboard([Markup.button.url("🎭 Присоединиться", this.joinUrl(game.id))]).reply_markup
+      reply_markup: Markup.inlineKeyboard([Markup.button.url("🤵🏻 Присоединиться", this.joinUrl(game.id))]).reply_markup
     });
   }
 
@@ -815,8 +820,7 @@ export class GameEngine {
 
   private lobbyKeyboard(gameId: number): InlineKeyboardMarkup {
     return Markup.inlineKeyboard([
-      [Markup.button.url("🎭 Присоединиться", this.joinUrl(gameId))],
-      [Markup.button.callback("▶️ Начать игру", `begin:${gameId}`), Markup.button.callback("🔄 Обновить", `refresh:${gameId}`)]
+      [Markup.button.url("🤵🏻 Присоединиться", this.joinUrl(gameId))]
     ]).reply_markup;
   }
 
