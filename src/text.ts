@@ -38,18 +38,16 @@ export function roleDescription(role: Role): string {
 }
 
 export function lobbyText(brandName: string, game: GameRow, players: PlayerRow[]): string {
-  const list = players.map((player, index) => `${index + 1}. ${mention(player)}`).join("\n");
-  const missing = Math.max(0, game.settings.minPlayers - players.length);
-  const host = players.find((player) => player.user_id === game.host_id) ?? players[0];
+  const names = players.map((player) => player.username ? escapeHtml(player.username) : escapeHtml(player.first_name)).join(", ");
+  const chatTitle = game.chat_title ? ` ${escapeHtml(game.chat_title)}` : "";
   return [
-    `🎭 <b>${escapeHtml(brandName)} · Ведётся набор в игру</b>`,
-    "",
-    host ? `<b>Создатель:</b> ${mention(host)}` : "",
+    `<b>${escapeHtml(brandName)}</b>${chatTitle}`,
+    "<b>Ведётся набор в игру</b>",
     "",
     "<b>Зарегистрировались:</b>",
-    list || "Пока никого нет.",
+    names ? `${names}.` : "Пока никого нет.",
     "",
-    `Итого <b>${players.length}</b> чел.` + (missing > 0 ? ` · нужно ещё <b>${missing}</b>` : " · ✅ можно начинать")
+    `Итого <b>${players.length}</b> чел.`
   ].join("\n");
 }
 

@@ -969,7 +969,7 @@ export class GameEngine {
 
   private lobbyKeyboard(gameId: number): InlineKeyboardMarkup {
     return Markup.inlineKeyboard([
-      [Markup.button.url("👤 Присоединиться ↗", this.joinUrl(gameId))],
+      [Markup.button.url("👤 Присоединиться", this.joinUrl(gameId))],
       [Markup.button.callback("▶️ Начать игру", `begin:${gameId}`), Markup.button.callback("🔄 Обновить", `refresh:${gameId}`)]
     ]).reply_markup;
   }
