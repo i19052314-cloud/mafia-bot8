@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { ROLES } from "./types.js";
 import type {
   ActionRow,
   ActionType,
   ActivePhase,
+  Currency,
   GameRow,
   GameSettings,
   NominationRow,
@@ -56,18 +58,21 @@ export class GameDatabase {
         chat_title TEXT NOT NULL DEFAULT '',
         host_id TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('lobby','running','finished','cancelled')),
-        phase TEXT NOT NULL CHECK (phase IN ('lobby','night','day','nomination','vote','last_word','paused','finished')),
+        phase TEXT NOT NULL CHECK (phase IN ('lobby','night','day','nomination','vote','last_word','judgment','paused','finished')),
         day INTEGER NOT NULL DEFAULT 0,
         phase_ends_at DOUBLE PRECISION,
-        paused_phase TEXT CHECK (paused_phase IS NULL OR paused_phase IN ('night','day','nomination','vote','last_word')),
+        paused_phase TEXT CHECK (paused_phase IS NULL OR paused_phase IN ('night','day','nomination','vote','last_word','judgment')),
         paused_remaining_ms DOUBLE PRECISION,
         pending_elimination_id TEXT,
         lobby_message_id INTEGER,
-        winner TEXT CHECK (winner IS NULL OR winner IN ('town','mafia','maniac')),
+        winner TEXT CHECK (winner IS NULL OR winner IN ('town','mafia','maniac','suicide','mistress')),
         settings JSONB NOT NULL,
         created_at DOUBLE PRECISION NOT NULL,
+        started_at DOUBLE PRECISION,
         updated_at DOUBLE PRECISION NOT NULL
       );
+
+      ALTER TABLE games ADD COLUMN IF NOT EXISTS started_at DOUBLE PRECISION;
 
       CREATE UNIQUE INDEX IF NOT EXISTS games_one_active_per_chat
       ON games(chat_id) WHERE status IN ('lobby','running');
@@ -77,18 +82,21 @@ export class GameDatabase {
         user_id TEXT NOT NULL,
         username TEXT,
         first_name TEXT NOT NULL,
-        role TEXT CHECK (role IS NULL OR role IN ('citizen','mafia','don','commissar','doctor','maniac','bum')),
+        role TEXT CHECK (role IS NULL OR role IN ('citizen','mafia','don','commissar','doctor','maniac','bum','kamikaze','sergeant','lawyer','lucky','suicide','mistress')),
         alive INTEGER NOT NULL DEFAULT 1,
         afk_strikes INTEGER NOT NULL DEFAULT 0,
+        lucky_shield INTEGER NOT NULL DEFAULT 0,
         joined_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (game_id, user_id)
       );
+
+      ALTER TABLE game_players ADD COLUMN IF NOT EXISTS lucky_shield INTEGER NOT NULL DEFAULT 0;
 
       CREATE TABLE IF NOT EXISTS actions (
         game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
         day INTEGER NOT NULL,
         actor_id TEXT NOT NULL,
-        type TEXT NOT NULL CHECK (type IN ('mafia_kill','don_check','commissar_check','commissar_shoot','doctor_heal','maniac_kill','bum_visit')),
+        type TEXT NOT NULL CHECK (type IN ('mafia_kill','don_check','commissar_check','commissar_shoot','doctor_heal','maniac_kill','bum_visit','lawyer_defend','mistress_visit')),
         target_id TEXT NOT NULL,
         created_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (game_id, day, actor_id, type)
@@ -264,9 +272,13 @@ export class GameDatabase {
   async assignRoles(gameId: number, assignments: Map<string, Role>): Promise<void> {
     await this.transaction(async (client) => {
       for (const [userId, role] of assignments) {
-        await client.query("UPDATE game_players SET role = $1, alive = 1, afk_strikes = 0 WHERE game_id = $2 AND user_id = $3", [role, gameId, userId]);
+        await client.query("UPDATE game_players SET role = $1, alive = 1, afk_strikes = 0, lucky_shield = CASE WHEN $1::text = 'lucky' THEN 1 ELSE 0 END WHERE game_id = $2 AND user_id = $3", [role, gameId, userId]);
       }
     });
+  }
+
+  async setLuckyShield(gameId: number, userId: string, value: number): Promise<void> {
+    await this.pool.query("UPDATE game_players SET lucky_shield = $1 WHERE game_id = $2 AND user_id = $3", [value, gameId, userId]);
   }
 
   async setPhase(gameId: number, phase: Phase, day: number, endsAt: number | null): Promise<void> {
@@ -278,10 +290,11 @@ export class GameDatabase {
   }
 
   async startGame(gameId: number, firstNightEndsAt: number): Promise<boolean> {
+    const now = Date.now();
     const result = await this.pool.query(`
       UPDATE games SET status = 'running', phase = 'night', day = 1,
-        phase_ends_at = $1, updated_at = $2 WHERE id = $3 AND status = 'lobby'
-    `, [firstNightEndsAt, Date.now(), gameId]);
+        phase_ends_at = $1, started_at = $2, updated_at = $2 WHERE id = $3 AND status = 'lobby'
+    `, [firstNightEndsAt, now, gameId]);
     return (result.rowCount ?? 0) > 0;
   }
 
@@ -415,11 +428,7 @@ export class GameDatabase {
       `, [winner, Date.now(), gameId]);
 
       for (const player of players) {
-        const won = player.role === "maniac"
-          ? winner === "maniac"
-          : player.role === "mafia" || player.role === "don"
-            ? winner === "mafia"
-            : winner === "town";
+        const won = roleWon(player.role, winner);
         await client.query(`
           UPDATE user_stats SET games = games + 1, wins = wins + $1,
             town_wins = town_wins + $2, mafia_wins = mafia_wins + $3,
@@ -462,7 +471,63 @@ export class GameDatabase {
     return normalizeProfile(result.rows[0]);
   }
 
-  async buyShopItem(user: TelegramUserData, item: ShopItem, price: number): Promise<{ ok: boolean; profile: UserProfile }> {
+  async findUserByRef(ref: string): Promise<TelegramUserData | undefined> {
+    const clean = ref.trim().replace(/^@/, "");
+    const idMatch = /^\d+$/.test(clean);
+    const byId = idMatch
+      ? { id: clean }
+      : undefined;
+    const filter = byId ? { id: byId.id } : { username: clean };
+
+    const inEconomy = await this.pool.query(
+      "SELECT user_id, username, first_name FROM user_economy WHERE user_id = $1 OR lower(username) = lower($2) LIMIT 1",
+      [byId ? byId.id : "", clean]
+    );
+    if (inEconomy.rows[0]) {
+      const row = inEconomy.rows[0];
+      return { id: String(row.user_id), username: row.username ?? undefined, firstName: row.first_name };
+    }
+
+    const inStats = await this.pool.query(
+      "SELECT user_id, username, first_name FROM user_stats WHERE user_id = $1 OR lower(username) = lower($2) LIMIT 1",
+      [byId ? byId.id : "", clean]
+    );
+    if (inStats.rows[0]) {
+      const row = inStats.rows[0];
+      return { id: String(row.user_id), username: row.username ?? undefined, firstName: row.first_name };
+    }
+
+    const inPlayers = await this.pool.query(
+      "SELECT user_id, username, first_name FROM game_players WHERE user_id = $1 OR lower(username) = lower($2) LIMIT 1",
+      [byId ? byId.id : "", clean]
+    );
+    if (inPlayers.rows[0]) {
+      const row = inPlayers.rows[0];
+      return { id: String(row.user_id), username: row.username ?? undefined, firstName: row.first_name };
+    }
+    return undefined;
+  }
+
+  async grantCurrency(user: TelegramUserData, currency: Currency, amount: number): Promise<UserProfile> {
+    const result = await this.pool.query(`
+      INSERT INTO user_economy (user_id, username, first_name, money, gems, updated_at)
+      VALUES ($1, $2, $3,
+        1000 + CASE WHEN $4::text = 'money' THEN $5 ELSE 0 END,
+        CASE WHEN $4::text = 'gems' THEN $5 ELSE 0 END,
+        $6)
+      ON CONFLICT(user_id) DO UPDATE SET
+        username = EXCLUDED.username,
+        first_name = EXCLUDED.first_name,
+        money = user_economy.money + CASE WHEN $4::text = 'money' THEN $5 ELSE 0 END,
+        gems = user_economy.gems + CASE WHEN $4::text = 'gems' THEN $5 ELSE 0 END,
+        updated_at = $6
+      RETURNING user_id, money, gems, protection, documents, active_role
+    `, [user.id, user.username ?? null, user.firstName, currency, amount, Date.now()]);
+    return normalizeProfile(result.rows[0]);
+  }
+
+  async buyShopItem(user: TelegramUserData, item: ShopItem, price: number, currency: Currency): Promise<{ ok: boolean; profile: UserProfile }> {
+    const balanceColumn = currency === "gems" ? "gems" : "money";
     return this.transaction(async (client) => {
       await client.query(`
         INSERT INTO user_economy (user_id, username, first_name, updated_at)
@@ -475,10 +540,10 @@ export class GameDatabase {
         [user.id]
       );
       const profile = normalizeProfile(current.rows[0]);
-      if (profile.money < price) return { ok: false, profile };
+      if (profile[balanceColumn] < price) return { ok: false, profile };
 
       const result = await client.query(`
-        UPDATE user_economy SET money = money - $1, ${item} = ${item} + 1, updated_at = $2
+        UPDATE user_economy SET ${balanceColumn} = ${balanceColumn} - $1, ${item} = ${item} + 1, updated_at = $2
         WHERE user_id = $3
         RETURNING user_id, money, gems, protection, documents, active_role
       `, [price, Date.now(), user.id]);
@@ -607,9 +672,21 @@ function normalizeGame(row: Record<string, unknown>): GameRow {
     paused_remaining_ms: row.paused_remaining_ms == null ? null : Number(row.paused_remaining_ms),
     lobby_message_id: row.lobby_message_id == null ? null : Number(row.lobby_message_id),
     created_at: Number(row.created_at),
+    started_at: row.started_at == null ? null : Number(row.started_at),
     updated_at: Number(row.updated_at),
     settings: normalizeSettings(row.settings, undefined)
   } as GameRow;
+}
+
+function roleWon(role: Role | null, winner: Winner): boolean {
+  if (!role) return false;
+  switch (winner) {
+    case "town": return ROLES[role].side === "town";
+    case "mafia": return role === "mafia" || role === "don" || role === "lawyer";
+    case "maniac": return role === "maniac";
+    case "suicide": return role === "suicide";
+    case "mistress": return role === "mistress";
+  }
 }
 
 function normalizeProfile(row: Record<string, unknown>): UserProfile {

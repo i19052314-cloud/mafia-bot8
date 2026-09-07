@@ -5,13 +5,19 @@ export const ROLES = {
   commissar: { title: "Комиссар", emoji: "👮", side: "town" },
   doctor: { title: "Доктор", emoji: "👨‍⚕️", side: "town" },
   maniac: { title: "Маньяк", emoji: "🪓", side: "neutral" },
-  bum: { title: "Бомж", emoji: "🧔", side: "town" }
+  bum: { title: "Бомж", emoji: "🧔", side: "town" },
+  kamikaze: { title: "Камикадзе", emoji: "💣", side: "town" },
+  sergeant: { title: "Сержант", emoji: "🎖️", side: "town" },
+  lawyer: { title: "Адвокат", emoji: "🎩", side: "mafia" },
+  lucky: { title: "Счастливчик", emoji: "🍀", side: "town" },
+  suicide: { title: "Самоубийца", emoji: "💀", side: "neutral" },
+  mistress: { title: "Любовница", emoji: "💋", side: "neutral" }
 } as const;
 
 export type Role = keyof typeof ROLES;
 export type Side = (typeof ROLES)[Role]["side"];
 export type GameStatus = "lobby" | "running" | "finished" | "cancelled";
-export type ActivePhase = "night" | "day" | "nomination" | "vote" | "last_word";
+export type ActivePhase = "night" | "day" | "nomination" | "vote" | "last_word" | "judgment";
 export type Phase = "lobby" | ActivePhase | "paused" | "finished";
 export type ActionType =
   | "mafia_kill"
@@ -20,8 +26,10 @@ export type ActionType =
   | "commissar_shoot"
   | "doctor_heal"
   | "maniac_kill"
-  | "bum_visit";
-export type Winner = "town" | "mafia" | "maniac";
+  | "bum_visit"
+  | "lawyer_defend"
+  | "mistress_visit";
+export type Winner = "town" | "mafia" | "maniac" | "suicide" | "mistress";
 
 export interface RoleSettings {
   don: boolean;
@@ -29,6 +37,12 @@ export interface RoleSettings {
   doctor: boolean;
   maniac: boolean;
   bum: boolean;
+  kamikaze: boolean;
+  sergeant: boolean;
+  lawyer: boolean;
+  lucky: boolean;
+  suicide: boolean;
+  mistress: boolean;
 }
 
 export interface GameSettings {
@@ -39,6 +53,7 @@ export interface GameSettings {
   nominationSeconds: number;
   voteSeconds: number;
   lastWordSeconds: number;
+  judgeSeconds: number;
   revealDeadRoles: boolean;
   doctorSelfHeal: boolean;
   commissionerCanShoot: boolean;
@@ -47,6 +62,7 @@ export interface GameSettings {
   nominationsEnabled: boolean;
   afkLimit: number;
   autoDeleteMessages: boolean;
+  friendlyFire: boolean;
   roles: RoleSettings;
 }
 
@@ -66,6 +82,7 @@ export interface GameRow {
   winner: Winner | null;
   settings: GameSettings;
   created_at: number;
+  started_at: number | null;
   updated_at: number;
 }
 
@@ -77,6 +94,7 @@ export interface PlayerRow {
   role: Role | null;
   alive: number;
   afk_strikes: number;
+  lucky_shield: number;
   joined_at: number;
 }
 
@@ -113,20 +131,25 @@ export interface UserStats {
   maniac_wins: number;
 }
 
+export type Currency = "money" | "gems";
+
 export const SHOP_ITEMS = {
   documents: {
     title: "📂 Документы",
-    price: 300,
+    price: 150,
+    currency: "money",
     description: "Фальшивые документы могут пригодиться когда твою роль кто-то захочет проверить"
   },
   protection: {
     title: "🛡 Защита",
-    price: 250,
+    price: 100,
+    currency: "money",
     description: "Один раз может спасти тебе жизнь"
   },
   active_role: {
     title: "🎭 Активная роль",
-    price: 500,
+    price: 1,
+    currency: "gems",
     description: "Даёт 99% шанс выпадения активной роли"
   }
 } as const;
