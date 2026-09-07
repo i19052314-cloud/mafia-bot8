@@ -17,7 +17,7 @@ export const ROLES = {
 export type Role = keyof typeof ROLES;
 export type Side = (typeof ROLES)[Role]["side"];
 export type GameStatus = "lobby" | "running" | "finished" | "cancelled";
-export type ActivePhase = "night" | "day" | "nomination" | "vote" | "last_word";
+export type ActivePhase = "night" | "day" | "nomination" | "vote" | "last_word" | "judgment";
 export type Phase = "lobby" | ActivePhase | "paused" | "finished";
 export type ActionType =
   | "mafia_kill"
@@ -53,6 +53,7 @@ export interface GameSettings {
   nominationSeconds: number;
   voteSeconds: number;
   lastWordSeconds: number;
+  judgeSeconds: number;
   revealDeadRoles: boolean;
   doctorSelfHeal: boolean;
   commissionerCanShoot: boolean;

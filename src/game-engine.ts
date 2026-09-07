@@ -66,6 +66,8 @@ export class GameEngine {
   private readonly startingGames = new Set<number>();
   private readonly voteMessages = new Map<string, number>();
   private readonly voteCandidates = new Map<number, PlayerRow[]>();
+  private readonly judgeVotes = new Map<number, Map<string, "yes" | "no">>();
+  private readonly judgeMessageId = new Map<number, number>();
 
   constructor(
     private readonly bot: Telegraf<Context>,
@@ -458,6 +460,28 @@ export class GameEngine {
       ? `${mention(voter)} изменил(а) голос: ${targetText}`
       : `${mention(voter)} проголосовал(а) за ${targetText}`);
     await this.updateVoteCounters(game.id, game.day);
+  }
+
+  async handleJudgmentVote(ctx: Context, gameId: number, day: number, choice: "yes" | "no"): Promise<void> {
+    if (!ctx.from) return;
+    const game = await this.db.getGame(gameId);
+    if (!game || game.status !== "running" || game.phase !== "judgment" || game.day !== day) {
+      await safeAnswerCallback(ctx, "Этот суд уже завершён", true);
+      return;
+    }
+    const voter = await this.db.getPlayer(game.id, String(ctx.from.id));
+    if (!voter?.alive) {
+      await safeAnswerCallback(ctx, "Голосовать могут только живые игроки", true);
+      return;
+    }
+    await safeAnswerCallback(ctx, "Голос учтён");
+    let votes = this.judgeVotes.get(game.id);
+    if (!votes) {
+      votes = new Map();
+      this.judgeVotes.set(game.id, votes);
+    }
+    votes.set(voter.user_id, choice);
+    await this.updateJudgmentKeyboard(game, votes);
   }
 
   async showPlayers(ctx: Context): Promise<void> {
@@ -941,6 +965,9 @@ export class GameEngine {
           const allPlayers = await this.db.getPlayers(game.id);
           for (const player of allPlayers.filter((item) => item.alive === 1)) await this.sendRoleCard(player, allPlayers, game);
           await this.sendNightPrompts(game.id);
+        } else if (game.phase === "judgment" && game.pending_elimination_id) {
+          const candidate = await this.db.getPlayer(game.id, game.pending_elimination_id);
+          if (candidate) await this.openJudgment(game, candidate);
         }
       } catch (error) {
         this.logger.warn(`Не удалось восстановить игру ${game.id}`, error);
@@ -1139,6 +1166,8 @@ export class GameEngine {
     for (const key of this.voteMessages.keys()) {
       if (key.startsWith(`${gameId}:`)) this.voteMessages.delete(key);
     }
+    this.judgeVotes.delete(gameId);
+    this.judgeMessageId.delete(gameId);
   }
 
   private async onPhaseTimer(gameId: number): Promise<void> {
@@ -1155,6 +1184,7 @@ export class GameEngine {
     } else if (game.phase === "nomination") await this.openVotingFromNominations(game);
     else if (game.phase === "vote") await this.resolveVoting(game);
     else if (game.phase === "last_word") await this.finalizeLastWord(game);
+    else if (game.phase === "judgment") await this.resolveJudgment(game);
   }
 
   private async resolveNight(game: GameRow): Promise<void> {
@@ -1458,54 +1488,52 @@ export class GameEngine {
     const aliveIds = new Set(alive.map((player) => player.user_id));
     const votes = (await this.db.getVotes(game.id, game.day)).filter((vote) => aliveIds.has(vote.voter_id) && (vote.target_id === "skip" || aliveIds.has(vote.target_id)));
 
-    const afkIds: string[] = [];
-    if (game.settings.afkLimit) {
-      const voters = new Set(votes.map((vote) => vote.voter_id));
-      const blocked = nightBlockedUsers(await this.db.getActions(game.id, game.day), await this.db.getPlayers(game.id));
-      for (const player of alive) {
-        if (blocked.has(player.user_id)) continue;
-        const voted = voters.has(player.user_id);
-        const strikes = voted ? 0 : player.afk_strikes + 1;
-        await this.db.setAfkStrikes(game.id, player.user_id, strikes);
-        if (!voted && strikes >= game.settings.afkLimit) afkIds.push(player.user_id);
-      }
-      await this.db.killPlayers(game.id, afkIds);
+    const voters = new Set(votes.map((vote) => vote.voter_id));
+    const blocked = nightBlockedUsers(await this.db.getActions(game.id, game.day), await this.db.getPlayers(game.id));
+    const hanged: PlayerRow[] = [];
+    for (const player of alive) {
+      if (blocked.has(player.user_id)) continue;
+      if (voters.has(player.user_id)) continue;
+      hanged.push(player);
     }
+    if (hanged.length) await this.db.killPlayers(game.id, hanged.map((player) => player.user_id));
 
-    const selected = selectPluralityTarget(votes.map((vote) => vote.target_id));
-    const afkSet = new Set(afkIds);
-    const selectedPlayer = selected && selected !== "skip" && !afkSet.has(selected)
-      ? alive.find((player) => player.user_id === selected)
+    const aliveAfter = await this.db.getPlayers(game.id, true);
+    const afterIds = new Set(aliveAfter.map((player) => player.user_id));
+    const validVotes = votes.filter((vote) => vote.target_id === "skip" || afterIds.has(vote.target_id));
+    const selected = selectPluralityTarget(validVotes.map((vote) => vote.target_id));
+    const selectedPlayer = selected && selected !== "skip"
+      ? aliveAfter.find((player) => player.user_id === selected)
       : undefined;
     await this.cleanupPhaseMessages(game);
     const lines = ["⚖️ <b>Голосование окончено</b>"];
     if (!selected || selected === "skip") {
-      lines.push(!votes.length ? "Никто не проголосовал." : selected === "skip" ? "Город решил никого не изгонять." : "Голоса разделились. Никто не изгнан.");
+      lines.push(!validVotes.length ? "Никто не проголосовал." : selected === "skip" ? "Город решил никого не изгонять." : "Голоса разделились. Никто не изгнан.");
     } else if (!selectedPlayer) {
-      lines.push("Выбранный кандидат уже выбыл за бездействие.");
+      lines.push("Выбранный кандидат уже покинул город.");
     } else {
       lines.push(`${mention(selectedPlayer)} получает большинство голосов.`);
     }
-    for (const player of alive.filter((item) => afkSet.has(item.user_id))) {
-      lines.push(`💤 ${mention(player)} выбыл(а) за пропуск голосований${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
+    for (const player of hanged) {
+      lines.push(eliminationDeathLine(player, game.settings.revealDeadRoles));
     }
     await this.sendTracked(game, lines.join("\n"));
 
     if (!selectedPlayer) {
-      const winnerAfterAfk = determineWinner(await this.db.getPlayers(game.id, true));
-      if (winnerAfterAfk) await this.finishGame(game, winnerAfterAfk);
+      const winnerAfter = determineWinner(await this.db.getPlayers(game.id, true));
+      if (winnerAfter) await this.finishGame(game, winnerAfter);
       else await this.startNextNight(game.id, game.day + 1);
       return;
     }
+    await this.db.setPendingElimination(game.id, selectedPlayer.user_id);
     if (game.settings.lastWordSeconds > 0) {
       const endsAt = Date.now() + game.settings.lastWordSeconds * 1000;
-      await this.db.setPendingElimination(game.id, selectedPlayer.user_id);
       await this.db.setPhase(game.id, "last_word", game.day, endsAt);
       const updated = (await this.db.getGame(game.id))!;
       await this.sendTracked(updated, `🎙 ${mention(selectedPlayer)}, ваше последнее слово. У вас <b>${game.settings.lastWordSeconds} сек.</b>`);
       this.schedulePhase(game.id, endsAt);
     } else {
-      await this.eliminateVotedPlayer(game, selectedPlayer);
+      await this.openJudgment((await this.db.getGame(game.id))!, selectedPlayer);
     }
   }
 
@@ -1518,7 +1546,68 @@ export class GameEngine {
       await this.startNextNight(game.id, game.day + 1);
       return;
     }
-    await this.eliminateVotedPlayer(current, player);
+    await this.openJudgment(current, player);
+  }
+
+  private async openJudgment(game: GameRow, candidate: PlayerRow): Promise<void> {
+    const current = await this.db.getGame(game.id);
+    if (!current || current.phase === "finished") return;
+    this.judgeVotes.delete(game.id);
+    const endsAt = Date.now() + game.settings.judgeSeconds * 1000;
+    await this.db.setPendingElimination(game.id, candidate.user_id);
+    await this.db.setPhase(game.id, "judgment", game.day, endsAt);
+    const updated = (await this.db.getGame(game.id))!;
+    await this.cleanupPhaseMessages(updated);
+    try {
+      const message = await this.bot.telegram.sendMessage(updated.chat_id,
+        `Вы точно хотите линчевать ${mention(candidate)}?`,
+        { parse_mode: "HTML", reply_markup: judgeKeyboard(game.id, game.day, { yes: 0, no: 0 }) });
+      this.judgeMessageId.set(game.id, message.message_id);
+    } catch (error) {
+      this.logger.warn(`Не удалось открыть суд Линча ${game.id}`, error);
+    }
+    this.schedulePhase(game.id, endsAt);
+  }
+
+  private async updateJudgmentKeyboard(game: GameRow, votes: Map<string, "yes" | "no">): Promise<void> {
+    const messageId = this.judgeMessageId.get(game.id);
+    if (!messageId) return;
+    let yes = 0, no = 0;
+    for (const value of votes.values()) {
+      if (value === "yes") yes += 1; else no += 1;
+    }
+    try {
+      await this.bot.telegram.editMessageReplyMarkup(game.chat_id, messageId, undefined,
+        judgeKeyboard(game.id, game.day, { yes, no }));
+    } catch (error) {
+      this.logger.debug(`Не удалось обновить счётчики суда ${game.id}`, error);
+    }
+  }
+
+  private async resolveJudgment(game: GameRow): Promise<void> {
+    const current = await this.db.getGame(game.id);
+    if (!current || current.phase !== "judgment") return;
+    const votes = this.judgeVotes.get(game.id) ?? new Map<string, "yes" | "no">();
+    let yes = 0, no = 0;
+    for (const value of votes.values()) {
+      if (value === "yes") yes += 1; else no += 1;
+    }
+    this.judgeVotes.delete(game.id);
+    this.judgeMessageId.delete(game.id);
+    const candidate = current.pending_elimination_id ? await this.db.getPlayer(game.id, current.pending_elimination_id) : undefined;
+    await this.cleanupPhaseMessages(game);
+
+    if (!candidate?.alive || no >= yes) {
+      await this.db.setPendingElimination(game.id, null);
+      await this.sendTracked(game, yes === 0 && no === 0
+        ? "Город не смог договориться о казни. Никто не изгнан."
+        : "Город пощадил подсудимого. Никто не изгнан.");
+      const winner = determineWinner(await this.db.getPlayers(game.id, true));
+      if (winner) await this.finishGame(game, winner);
+      else await this.startNextNight(game.id, game.day + 1);
+      return;
+    }
+    await this.eliminateVotedPlayer(game, candidate);
   }
 
   private async eliminateVotedPlayer(game: GameRow, player: PlayerRow): Promise<void> {
@@ -1535,7 +1624,7 @@ export class GameEngine {
     await this.db.killPlayers(game.id, [player.user_id, ...(revenge ? [revenge.user_id] : [])]);
     await this.db.setPendingElimination(game.id, null);
     await this.cleanupPhaseMessages(game);
-    const playerLine = `${mention(player)} покидает город${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`;
+    const playerLine = eliminationDeathLine(player, game.settings.revealDeadRoles);
     const revengeLine = revenge
       ? `\n💣 Камикадзе утянул(а) с собой ${mention(revenge)}${game.settings.revealDeadRoles && revenge.role ? ` — ${roleLabel(revenge.role)}` : ""}.`
       : "";
@@ -1720,6 +1809,7 @@ function settingsKeyboard(settings: GameSettings): InlineKeyboardMarkup {
     [Markup.button.callback(`🌙 Ночь ${settings.nightSeconds}с`, "cfg:night"), Markup.button.callback(`☀️ День ${settings.daySeconds}с`, "cfg:day")],
     [Markup.button.callback(`📣 Кандидаты ${settings.nominationSeconds}с`, "cfg:nomtime"), Markup.button.callback(`⚖️ Голос ${settings.voteSeconds}с`, "cfg:votetime")],
     [Markup.button.callback(`🎙 Слово ${settings.lastWordSeconds}с`, "cfg:lastword"), Markup.button.callback(`💤 AFK ${settings.afkLimit || "выкл"}`, "cfg:afk")],
+    [Markup.button.callback(`⚖️ Суд ${settings.judgeSeconds}с`, "cfg:judge")],
     [Markup.button.callback(`${flag(settings.nominationsEnabled)} Кандидатуры`, "cfg:nominations"), Markup.button.callback(`${flag(settings.revealDeadRoles)} Роли`, "cfg:reveal")],
     [Markup.button.callback(`${flag(settings.doctorSelfHeal)} Самолечение`, "cfg:selfheal"), Markup.button.callback(`${flag(settings.commissionerCanShoot)} Выстрел`, "cfg:shoot")],
     [Markup.button.callback(`${flag(settings.allowSelfVote)} За себя`, "cfg:selfvote"), Markup.button.callback(`${flag(settings.allowSkipVote)} Пропуск`, "cfg:skip")],
@@ -1764,6 +1854,7 @@ function mutateSetting(settings: GameSettings, key: string): void {
     case "nomtime": settings.nominationSeconds = cycle(settings.nominationSeconds); break;
     case "votetime": settings.voteSeconds = cycle(settings.voteSeconds); break;
     case "lastword": settings.lastWordSeconds = cycle(settings.lastWordSeconds, [0, 10, 15, 30, 45, 60]); break;
+    case "judge": settings.judgeSeconds = cycle(settings.judgeSeconds); break;
     case "afk": settings.afkLimit = cycle(settings.afkLimit, [0, 1, 2, 3]); break;
     case "nominations": settings.nominationsEnabled = !settings.nominationsEnabled; break;
     case "reveal": settings.revealDeadRoles = !settings.revealDeadRoles; break;
@@ -1939,8 +2030,20 @@ function isPlayer(player: PlayerRow | undefined): player is PlayerRow {
   return player !== undefined;
 }
 
+function eliminationDeathLine(player: PlayerRow, revealRole: boolean): string {
+  const was = revealRole && player.role ? ` Он был ${roleLabel(player.role)}.` : "";
+  return `${mention(player)} не выдержал гнетущей атмосферы этого города и повесился.${was}`;
+}
+
+function judgeKeyboard(gameId: number, day: number, counts: { yes: number; no: number }): InlineKeyboardMarkup {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback(`👍 ${counts.yes}`, `judge:${gameId}:${day}:yes`)],
+    [Markup.button.callback(`👎 ${counts.no}`, `judge:${gameId}:${day}:no`)]
+  ]).reply_markup;
+}
+
 function isActivePhase(phase: GameRow["phase"]): phase is ActivePhase {
-  return ["night", "day", "nomination", "vote", "last_word"].includes(phase);
+  return ["night", "day", "nomination", "vote", "last_word", "judgment"].includes(phase);
 }
 
 function privateHtml(): { parse_mode: "HTML"; protect_content: true } {
@@ -1968,6 +2071,7 @@ function phaseName(phase: GameRow["phase"]): string {
     case "nomination": return "выдвижение";
     case "vote": return "голосование";
     case "last_word": return "последнее слово";
+    case "judgment": return "суд Линча";
     case "paused": return "пауза";
     case "finished": return "игра окончена";
   }

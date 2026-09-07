@@ -161,6 +161,8 @@ async function main(): Promise<void> {
     (ctx) => engine.handleNomination(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
   bot.action(/^vote:(\d+):(\d+):(skip|-?\d+)$/,
     (ctx) => engine.handleVote(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
+  bot.action(/^judge:(\d+):(\d+):(yes|no)$/,
+    (ctx) => engine.handleJudgmentVote(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3] as "yes" | "no"));
   bot.action(/^act:(\d+):(\d+):(mafia_kill|don_check|commissar_check|commissar_shoot|doctor_heal|maniac_kill|bum_visit|lawyer_defend|mistress_visit):(-?\d+)$/,
     (ctx) => engine.handleNightAction(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3] as ActionType, ctx.match[4]!));
   bot.action(/^cc:(\d+):(\d+):(check|shoot)$/,

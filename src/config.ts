@@ -28,6 +28,7 @@ export function defaultGameSettings(): GameSettings {
     nominationSeconds: integer("NOMINATION_SECONDS", 30, 10, 600),
     voteSeconds: integer("VOTE_SECONDS", 30, 10, 600),
     lastWordSeconds: integer("LAST_WORD_SECONDS", 15, 0, 300),
+    judgeSeconds: integer("JUDGE_SECONDS", 30, 10, 600),
     revealDeadRoles: boolean("REVEAL_DEAD_ROLES", true),
     doctorSelfHeal: boolean("DOCTOR_SELF_HEAL", true),
     commissionerCanShoot: boolean("COMMISSIONER_CAN_SHOOT", false),

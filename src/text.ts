@@ -16,6 +16,7 @@ export function mention(player: Pick<PlayerRow, "user_id" | "first_name" | "user
 
 export function roleLabel(role: Role): string {
   const info = ROLES[role];
+  if (!info) return "❔ <b>Неизвестная роль</b>";
   return `${info.emoji} <b>${info.title}</b>`;
 }
 
@@ -136,7 +137,7 @@ export function settingsText(settings: GameSettings): string {
     "⚙️ <b>Настройки игры</b>",
     "",
     `<b>Игроки:</b> ${settings.minPlayers}–${settings.maxPlayers}`,
-    `<b>Таймеры:</b> ночь ${settings.nightSeconds}с · день ${settings.daySeconds}с · кандидатуры ${settings.nominationSeconds}с · голосование ${settings.voteSeconds}с · последнее слово ${settings.lastWordSeconds}с`,
+    `<b>Таймеры:</b> ночь ${settings.nightSeconds}с · день ${settings.daySeconds}с · кандидатуры ${settings.nominationSeconds}с · голосование ${settings.voteSeconds}с · последнее слово ${settings.lastWordSeconds}с · суд ${settings.judgeSeconds}с`,
     `<b>Роли:</b> ${enabledRoles || "только Мафия и Мирные"}`,
     "",
     `${flag(settings.nominationsEnabled)} Кандидатуры перед голосованием`,
