@@ -113,20 +113,25 @@ export interface UserStats {
   maniac_wins: number;
 }
 
+export type Currency = "money" | "gems";
+
 export const SHOP_ITEMS = {
   documents: {
     title: "📂 Документы",
-    price: 300,
+    price: 150,
+    currency: "money",
     description: "Фальшивые документы могут пригодиться когда твою роль кто-то захочет проверить"
   },
   protection: {
     title: "🛡 Защита",
-    price: 250,
+    price: 100,
+    currency: "money",
     description: "Один раз может спасти тебе жизнь"
   },
   active_role: {
     title: "🎭 Активная роль",
-    price: 500,
+    price: 1,
+    currency: "gems",
     description: "Даёт 99% шанс выпадения активной роли"
   }
 } as const;

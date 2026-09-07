@@ -6,10 +6,12 @@ import type { PhaseMedia } from "./media.js";
 import { assignRoles, determineWinner, selectPluralityTarget } from "./rules.js";
 import {
   alivePlayersText,
+  currencyLabel,
   escapeHtml,
   lobbyText,
   mention,
   playerName,
+  priceLabel,
   profileText,
   roleDescription,
   roleLabel,
@@ -24,6 +26,7 @@ import {
   type ActionType,
   type ActivePhase,
   type AppConfig,
+  type Currency,
   type GameRow,
   type GameSettings,
   type PlayerRow,
@@ -558,27 +561,62 @@ export class GameEngine {
     if (!ctx.from) return;
     const profile = await this.db.getProfile(userData(ctx.from));
     const displayName = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
-    await ctx.reply(profileText(displayName, profile), { parse_mode: "HTML" });
+    await this.replyOrEdit(ctx, profileText(displayName, profile), profileKeyboard());
+  }
+
+  async openShop(ctx: Context): Promise<void> {
+    await safeAnswerCallback(ctx);
+    if (!ctx.from) return;
+    const profile = await this.db.getProfile(userData(ctx.from));
+    await this.replyOrEdit(ctx, shopText(profile), shopKeyboard());
+  }
+
+  async backToProfile(ctx: Context): Promise<void> {
+    await safeAnswerCallback(ctx);
+    if (!ctx.from) return;
+    const profile = await this.db.getProfile(userData(ctx.from));
+    const displayName = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
+    await this.replyOrEdit(ctx, profileText(displayName, profile), profileKeyboard());
   }
 
   async showShop(ctx: Context): Promise<void> {
     if (!ctx.from) return;
     const profile = await this.db.getProfile(userData(ctx.from));
-    await ctx.reply(shopText(profile), { parse_mode: "HTML", reply_markup: shopKeyboard() });
+    await this.replyOrEdit(ctx, shopText(profile), shopKeyboard());
   }
 
   async handleShopPurchase(ctx: Context, item: ShopItem): Promise<void> {
     if (!ctx.from) return;
-    const price = SHOP_ITEMS[item].price;
-    const { ok, profile } = await this.db.buyShopItem(userData(ctx.from), item, price);
+    const shopItem = SHOP_ITEMS[item];
+    const { ok, profile } = await this.db.buyShopItem(userData(ctx.from), item, shopItem.price, shopItem.currency);
     if (!ok) {
-      await ctx.answerCbQuery("Недостаточно денег 💵", { show_alert: true });
+      await ctx.answerCbQuery(`Недостаточно ${currencyLabel(shopItem.currency)}`, { show_alert: true });
       return;
     }
-    await ctx.answerCbQuery(`Куплено: ${SHOP_ITEMS[item].title} ✅`);
+    await ctx.answerCbQuery(`Куплено: ${shopItem.title} ✅`);
     try {
       await ctx.editMessageText(shopText(profile), { parse_mode: "HTML", reply_markup: shopKeyboard() });
     } catch { /* message unchanged or too old to edit */ }
+  }
+
+  async handleBuyCurrency(ctx: Context, _currency: Currency): Promise<void> {
+    await safeAnswerCallback(ctx);
+    if (!ctx.from) return;
+    await ctx.reply(
+      "Пополнение валюты появится позже. Пока 💵 монеты и 💎 камни можно получить за участие в играх.",
+      { parse_mode: "HTML" }
+    );
+  }
+
+  private async replyOrEdit(ctx: Context, text: string, keyboard: InlineKeyboardMarkup): Promise<void> {
+    const message = ctx.callbackQuery?.message;
+    if (message && "message_id" in message) {
+      try {
+        await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+        return;
+      } catch { /* message unchanged or too old to edit */ }
+    }
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
   }
 
   async showStats(ctx: Context): Promise<void> {
@@ -1360,12 +1398,19 @@ function settingsKeyboard(settings: GameSettings): InlineKeyboardMarkup {
   ]).reply_markup;
 }
 
+function profileKeyboard(): InlineKeyboardMarkup {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("🛒 Магазин", "profile:shop")],
+    [Markup.button.callback("💰 Купить 💵", "profile:buy_money"), Markup.button.callback("💎 Купить 💎", "profile:buy_gems")]
+  ]).reply_markup;
+}
+
 function shopKeyboard(): InlineKeyboardMarkup {
-  return Markup.inlineKeyboard(
-    Object.entries(SHOP_ITEMS).map(([key, item]) =>
-      Markup.button.callback(`${item.title} — ${item.price}💵`, `shop:${key}`))
-      .map((button) => [button])
-  ).reply_markup;
+  return Markup.inlineKeyboard([
+    ...Object.entries(SHOP_ITEMS).map(([key, item]) =>
+      [Markup.button.callback(`${item.title} · ${priceLabel(item)}`, `shop:${key}`)]),
+    [Markup.button.callback("← Назад", "profile:back")]
+  ]).reply_markup;
 }
 
 function mutateSetting(settings: GameSettings, key: string): void {

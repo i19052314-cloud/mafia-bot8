@@ -4,6 +4,7 @@ import type {
   ActionRow,
   ActionType,
   ActivePhase,
+  Currency,
   GameRow,
   GameSettings,
   NominationRow,
@@ -462,7 +463,8 @@ export class GameDatabase {
     return normalizeProfile(result.rows[0]);
   }
 
-  async buyShopItem(user: TelegramUserData, item: ShopItem, price: number): Promise<{ ok: boolean; profile: UserProfile }> {
+  async buyShopItem(user: TelegramUserData, item: ShopItem, price: number, currency: Currency): Promise<{ ok: boolean; profile: UserProfile }> {
+    const balanceColumn = currency === "gems" ? "gems" : "money";
     return this.transaction(async (client) => {
       await client.query(`
         INSERT INTO user_economy (user_id, username, first_name, updated_at)
@@ -475,10 +477,10 @@ export class GameDatabase {
         [user.id]
       );
       const profile = normalizeProfile(current.rows[0]);
-      if (profile.money < price) return { ok: false, profile };
+      if (profile[balanceColumn] < price) return { ok: false, profile };
 
       const result = await client.query(`
-        UPDATE user_economy SET money = money - $1, ${item} = ${item} + 1, updated_at = $2
+        UPDATE user_economy SET ${balanceColumn} = ${balanceColumn} - $1, ${item} = ${item} + 1, updated_at = $2
         WHERE user_id = $3
         RETURNING user_id, money, gems, protection, documents, active_role
       `, [price, Date.now(), user.id]);

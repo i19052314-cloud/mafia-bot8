@@ -1,4 +1,4 @@
-import type { GameRow, GameSettings, PlayerRow, Role, UserProfile, Winner } from "./types.js";
+import type { Currency, GameRow, GameSettings, PlayerRow, Role, ShopItem, UserProfile, Winner } from "./types.js";
 import { ROLES, SHOP_ITEMS } from "./types.js";
 
 export function escapeHtml(value: string): string {
@@ -109,16 +109,23 @@ export function profileText(displayName: string, profile: UserProfile): string {
   ].join("\n");
 }
 
+export function currencyLabel(currency: Currency): string {
+  return currency === "gems" ? "💎" : "💵";
+}
+
+export function priceLabel(item: (typeof SHOP_ITEMS)[ShopItem]): string {
+  return `${item.price} ${currencyLabel(item.currency)}`;
+}
+
 export function shopText(profile: UserProfile): string {
   return [
-    "🛒 <b>Магазин</b>",
     "Что будем покупать?",
     "",
     ...Object.values(SHOP_ITEMS).flatMap((item) => [
-      `${item.title} — 💵 ${item.price}`,
+      item.title,
       item.description,
       ""
     ]),
-    `Ваш баланс: 💵 <b>${profile.money}</b>`
+    `Ваш баланс: 💵 <b>${profile.money}</b> · 💎 <b>${profile.gems}</b>`
   ].join("\n");
 }

@@ -146,6 +146,10 @@ async function main(): Promise<void> {
   bot.action(/^refresh:(\d+)$/, (ctx) => engine.refreshLobby(ctx, Number(ctx.match[1])));
   bot.action(/^begin:(\d+)$/, (ctx) => engine.beginGame(ctx, Number(ctx.match[1])));
   bot.action(/^cfg:([a-z_]+)$/, (ctx) => engine.handleSetting(ctx, ctx.match[1]!));
+  bot.action(/^profile:shop$/, (ctx) => engine.openShop(ctx));
+  bot.action(/^profile:back$/, (ctx) => engine.backToProfile(ctx));
+  bot.action(/^profile:buy_money$/, (ctx) => engine.handleBuyCurrency(ctx, "money"));
+  bot.action(/^profile:buy_gems$/, (ctx) => engine.handleBuyCurrency(ctx, "gems"));
   bot.action(/^shop:(documents|protection|active_role)$/, (ctx) => engine.handleShopPurchase(ctx, ctx.match[1] as ShopItem));
   bot.action(/^nom:(\d+):(\d+):(-?\d+)$/,
     (ctx) => engine.handleNomination(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
