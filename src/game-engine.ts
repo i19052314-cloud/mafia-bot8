@@ -60,6 +60,8 @@ export class GameEngine {
   private readonly warningTimers = new Map<number, NodeJS.Timeout>();
   private readonly promptTimers = new Map<number, NodeJS.Timeout>();
   private readonly startingGames = new Set<number>();
+  private readonly voteMessages = new Map<string, number>();
+  private readonly voteCandidates = new Map<number, PlayerRow[]>();
 
   constructor(
     private readonly bot: Telegraf<Context>,
@@ -389,6 +391,7 @@ export class GameEngine {
     await this.sendTracked(game, oldVote
       ? `${mention(voter)} изменил(а) голос: ${targetText}`
       : `${mention(voter)} проголосовал(а) за ${targetText}`);
+    await this.updateVoteCounters(game.id, game.day);
   }
 
   async showPlayers(ctx: Context): Promise<void> {
@@ -415,6 +418,7 @@ export class GameEngine {
       return;
     }
     this.clearTimers(game.id);
+    this.clearVoteState(game.id);
     await this.db.cancelGame(game.id);
     await this.db.recordAudit(game.chat_id, game.id, String(ctx.from.id), "stop_game");
     await ctx.reply("🛑 Игра отменена. Новый набор: /newgame");
@@ -836,6 +840,7 @@ export class GameEngine {
   shutdown(): void {
     for (const gameId of new Set([...this.phaseTimers.keys(), ...this.warningTimers.keys(), ...this.promptTimers.keys()])) {
       this.clearTimers(gameId);
+      this.clearVoteState(gameId);
     }
   }
 
@@ -983,6 +988,13 @@ export class GameEngine {
     const prompt = this.promptTimers.get(gameId);
     if (prompt) clearTimeout(prompt);
     this.promptTimers.delete(gameId);
+  }
+
+  private clearVoteState(gameId: number): void {
+    this.voteCandidates.delete(gameId);
+    for (const key of this.voteMessages.keys()) {
+      if (key.startsWith(`${gameId}:`)) this.voteMessages.delete(key);
+    }
   }
 
   private async onPhaseTimer(gameId: number): Promise<void> {
@@ -1161,23 +1173,54 @@ export class GameEngine {
       `Кандидаты: ${candidates.map((player) => mention(player)).join(", ")}`,
       `Голосуют <b>${alive.length}</b> живых игроков.`
     ].join("\n"), this.voteFromGroupKeyboard());
+    this.voteCandidates.set(game.id, candidates);
     await this.sendVotePrompts(updated, candidates);
     this.schedulePhase(game.id, endsAt);
   }
 
   private async sendVotePrompts(game: GameRow, candidates: PlayerRow[]): Promise<void> {
     const alive = await this.db.getPlayers(game.id, true);
+    const counts = await this.voteCounts(game);
     for (const voter of alive) {
       try {
-        await this.bot.telegram.sendMessage(voter.user_id, [
+        const message = await this.bot.telegram.sendMessage(voter.user_id, [
           "🔥 <b>Пришло время определить и наказать виновных.</b>",
           "Выберите, кого вы хотите линчевать."
         ].join("\n"), {
           ...privateHtml(),
-          reply_markup: voteKeyboard(game.id, game.day, candidates, game.settings.allowSkipVote)
+          reply_markup: voteKeyboard(game.id, game.day, candidates, game.settings.allowSkipVote, counts)
         });
+        this.voteMessages.set(`${game.id}:${game.day}:${voter.user_id}`, message.message_id);
       } catch (error) {
         this.logger.warn(`Не удалось отправить голосование игроку ${voter.user_id}`, error);
+      }
+    }
+  }
+
+  private async voteCounts(game: GameRow): Promise<Map<string, number>> {
+    const votes = await this.db.getVotes(game.id, game.day);
+    const counts = new Map<string, number>();
+    for (const vote of votes) {
+      counts.set(vote.target_id, (counts.get(vote.target_id) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  private async updateVoteCounters(gameId: number, day: number): Promise<void> {
+    const game = await this.db.getGame(gameId);
+    if (!game || game.status !== "running" || game.phase !== "vote" || game.day !== day) return;
+    const candidates = this.voteCandidates.get(gameId);
+    if (!candidates?.length) return;
+    const alive = await this.db.getPlayers(gameId, true);
+    const counts = await this.voteCounts(game);
+    const keyboard = voteKeyboard(gameId, day, candidates, game.settings.allowSkipVote, counts);
+    for (const voter of alive) {
+      const messageId = this.voteMessages.get(`${gameId}:${day}:${voter.user_id}`);
+      if (!messageId) continue;
+      try {
+        await this.bot.telegram.editMessageReplyMarkup(voter.user_id, messageId, undefined, keyboard);
+      } catch (error) {
+        this.logger.debug(`Не удалось обновить кнопки голосования игрока ${voter.user_id}`, error);
       }
     }
   }
@@ -1185,6 +1228,7 @@ export class GameEngine {
   private async resolveVoting(game: GameRow): Promise<void> {
     const current = await this.db.getGame(game.id);
     if (!current || current.phase !== "vote") return;
+    this.clearVoteState(game.id);
     const alive = await this.db.getPlayers(game.id, true);
     const aliveIds = new Set(alive.map((player) => player.user_id));
     const votes = (await this.db.getVotes(game.id, game.day)).filter((vote) => aliveIds.has(vote.voter_id) && (vote.target_id === "skip" || aliveIds.has(vote.target_id)));
@@ -1291,6 +1335,7 @@ export class GameEngine {
 
   private async finishGame(game: GameRow, winner: Winner): Promise<void> {
     this.clearTimers(game.id);
+    this.clearVoteState(game.id);
     await this.db.finishGame(game.id, winner);
     await this.cleanupPhaseMessages(game);
     const players = await this.db.getPlayers(game.id);
@@ -1379,9 +1424,16 @@ function nominationKeyboard(gameId: number, day: number, players: PlayerRow[]): 
   return Markup.inlineKeyboard(chunk(buttons, 2)).reply_markup;
 }
 
-function voteKeyboard(gameId: number, day: number, players: PlayerRow[], allowSkip: boolean): InlineKeyboardMarkup {
-  const buttons = players.map((player) => Markup.button.callback(plainPlayerName(player), `vote:${gameId}:${day}:${player.user_id}`));
-  if (allowSkip) buttons.push(Markup.button.callback("⏭ Пропустить", `vote:${gameId}:${day}:skip`));
+function voteKeyboard(gameId: number, day: number, players: PlayerRow[], allowSkip: boolean, counts: Map<string, number>): InlineKeyboardMarkup {
+  const buttons = players.map((player) => {
+    const count = counts.get(player.user_id) ?? 0;
+    const label = count > 0 ? `${plainPlayerName(player)} · 👍 ${count}` : plainPlayerName(player);
+    return Markup.button.callback(label, `vote:${gameId}:${day}:${player.user_id}`);
+  });
+  if (allowSkip) {
+    const skipCount = counts.get("skip") ?? 0;
+    buttons.push(Markup.button.callback(skipCount > 0 ? `⏭ Пропустить · 👍 ${skipCount}` : "⏭ Пропустить", `vote:${gameId}:${day}:skip`));
+  }
   return Markup.inlineKeyboard(chunk(buttons, 2)).reply_markup;
 }
 
