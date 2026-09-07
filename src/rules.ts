@@ -20,7 +20,12 @@ export function buildRoleDeck(playerCount: number, settings: GameSettings): Role
     ["doctor", settings.roles.doctor, 5],
     ["bum", settings.roles.bum, 7],
     ["maniac", settings.roles.maniac, 8],
-    ["kamikaze", settings.roles.kamikaze, 8]
+    ["kamikaze", settings.roles.kamikaze, 8],
+    ["lucky", settings.roles.lucky, 5],
+    ["sergeant", settings.roles.sergeant && settings.roles.commissar, 6],
+    ["lawyer", settings.roles.lawyer, 7],
+    ["suicide", settings.roles.suicide, 8],
+    ["mistress", settings.roles.mistress, 8]
   ];
   for (const [role, enabled, threshold] of optional) {
     if (enabled && playerCount >= threshold && roles.length < playerCount) roles.push(role);
@@ -45,14 +50,17 @@ export function assignRoles(userIds: string[], settings: GameSettings): Map<stri
 }
 
 export function determineWinner(alivePlayers: Pick<PlayerRow, "role">[]): Winner | null {
-  const mafiaCount = alivePlayers.filter((player) => player.role === "mafia" || player.role === "don").length;
+  const mafiaTeam = alivePlayers.filter((player) => player.role === "mafia" || player.role === "don" || player.role === "lawyer").length;
   const maniacCount = alivePlayers.filter((player) => player.role === "maniac").length;
+  const mistressCount = alivePlayers.filter((player) => player.role === "mistress").length;
   const total = alivePlayers.length;
 
   if (total === 0) return "town";
-  if (maniacCount === 1 && total === 1) return "maniac";
-  if (mafiaCount === 0 && maniacCount === 0) return "town";
-  if (mafiaCount > 0 && mafiaCount >= total - mafiaCount) return "mafia";
+  const solo = alivePlayers[0]?.role;
+  if (total === 1 && solo === "maniac") return "maniac";
+  if (total === 1 && solo === "mistress") return "mistress";
+  if (mafiaTeam === 0 && maniacCount === 0 && mistressCount === 0) return "town";
+  if (mafiaTeam > 0 && mafiaTeam >= total - mafiaTeam) return "mafia";
   return null;
 }
 

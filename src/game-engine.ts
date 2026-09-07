@@ -42,7 +42,9 @@ const ACTION_ROLE: Record<ActionType, Role[]> = {
   commissar_shoot: ["commissar"],
   doctor_heal: ["doctor"],
   maniac_kill: ["maniac"],
-  bum_visit: ["bum"]
+  bum_visit: ["bum"],
+  lawyer_defend: ["lawyer"],
+  mistress_visit: ["mistress"]
 };
 
 const ACTION_TITLES: Record<ActionType, string> = {
@@ -52,7 +54,9 @@ const ACTION_TITLES: Record<ActionType, string> = {
   commissar_shoot: "🔫 В кого выстрелить? Проверка этой ночью станет недоступна.",
   doctor_heal: "💉 Кого лечить?",
   maniac_kill: "🪓 Кого устранить?",
-  bum_visit: "🍾 К кому пойти в гости?"
+  bum_visit: "🍾 К кому пойти в гости?",
+  lawyer_defend: "🎩 Кого взять под защиту этой ночью?",
+  mistress_visit: "💋 Кого навестить и заблокировать?"
 };
 
 export class GameEngine {
@@ -251,9 +255,11 @@ export class GameEngine {
       return;
     }
 
+    const allPlayers = await this.db.getPlayers(game.id);
     const actor = await this.db.getPlayer(game.id, String(ctx.from.id));
     const target = await this.db.getPlayer(game.id, targetId);
-    if (!actor?.alive || !actor.role || !ACTION_ROLE[type].includes(actor.role)) {
+    const actingRole = actor ? effectiveNightRole(actor, allPlayers) : null;
+    if (!actor?.alive || !actor.role || !actingRole || !ACTION_ROLE[type].includes(actingRole)) {
       await safeAnswerCallback(ctx, "Это действие вам недоступно", true);
       return;
     }
@@ -269,8 +275,16 @@ export class GameEngine {
       await safeAnswerCallback(ctx, "Самолечение отключено", true);
       return;
     }
-    if (type === "mafia_kill" && (target.role === "mafia" || target.role === "don")) {
-      await safeAnswerCallback(ctx, "Нельзя атаковать участника мафии", true);
+    if (type === "mafia_kill" && !game.settings.friendlyFire && isMafiaTeam(target.role)) {
+      await safeAnswerCallback(ctx, "Вы не можете атаковать членов своего мафиозного клана. Выберите другую цель.", true);
+      return;
+    }
+    if (type === "commissar_shoot" && !game.settings.friendlyFire && target.role === "sergeant") {
+      await safeAnswerCallback(ctx, "Огонь по своим отключен. Вы не можете стрелять в напарника.", true);
+      return;
+    }
+    if (type === "mistress_visit" && actor.user_id === target.user_id) {
+      await safeAnswerCallback(ctx, "Нельзя навестить себя", true);
       return;
     }
     if (type === "doctor_heal") {
@@ -304,10 +318,23 @@ export class GameEngine {
         ? `🎯 ${playerName(target)} — это Комиссар.`
         : `❌ ${playerName(target)} — не Комиссар.`, privateHtml());
     } else if (type === "commissar_check") {
-      const mafia = target.role === "mafia" || target.role === "don";
+      const defendedByLawyer = await this.lawyerDefended(game.id, game.day, target.user_id);
+      const mafia = !defendedByLawyer && isMafiaTeam(target.role);
       await ctx.reply(mafia
         ? `🚨 ${playerName(target)} связан(а) с мафией.`
         : `✅ ${playerName(target)} не связан(а) с мафией.`, privateHtml());
+      const sergeant = allPlayers.find((player) => {
+        const role = player.role === "sergeant" && player.alive === 1 && player.user_id !== actor.user_id ? "sergeant" : null;
+        return role === "sergeant";
+      });
+      if (sergeant) {
+        await this.bot.telegram.sendMessage(sergeant.user_id, [
+          `🎖️ Копия отчёта ${playerName(actor)}:`,
+          mafia
+            ? `🚨 ${playerName(target)} связан(а) с мафией.`
+            : `✅ ${playerName(target)} не связан(а) с мафией.`
+        ].join("\n"), privateHtml());
+      }
     } else if (type === "commissar_shoot") {
       await ctx.reply(`🔫 Выстрел назначен: ${playerName(target)}. Изменить его нельзя.`, privateHtml());
     } else {
@@ -360,6 +387,11 @@ export class GameEngine {
     const voter = await this.db.getPlayer(game.id, String(ctx.from.id));
     if (!voter?.alive) {
       await safeAnswerCallback(ctx, "Голосовать могут только живые игроки", true);
+      return;
+    }
+    const blocked = nightBlockedUsers(await this.db.getActions(game.id, game.day), await this.db.getPlayers(game.id));
+    if (blocked.has(voter.user_id)) {
+      await safeAnswerCallback(ctx, "Вы заблокированы Любовницей и не можете голосовать.", true);
       return;
     }
     let target: PlayerRow | undefined;
@@ -959,17 +991,28 @@ export class GameEngine {
         ? team.map((member) => `• ${mention(member)} — ${roleLabel(member.role!)}`)
         : ["Вы действуете в одиночку."]), "", "Тайный обмен сообщениями: <code>/mafia текст</code>");
     }
+    if (player.role === "commissar") {
+      const sergeant = allPlayers.find((candidate) => candidate.role === "sergeant" && candidate.alive === 1);
+      if (sergeant) lines.push("", `<b>Ваш напарник:</b> ${mention(sergeant)} — 🎖️ Сержант. Ему приходят копии ваших проверок.`);
+    }
+    if (player.role === "sergeant") {
+      const commissar = allPlayers.find((candidate) => candidate.role === "commissar" && candidate.alive === 1);
+      if (commissar) lines.push("", `<b>Ваш напарник:</b> ${mention(commissar)} — 👮 Комиссар. Вы получаете копии его проверок.`);
+      else lines.push("", "Комиссар погиб. Сегодня вы принимаете его роль.");
+    }
     await this.bot.telegram.sendMessage(player.user_id, lines.join("\n"), privateHtml());
   }
 
   private async sendNightPrompts(gameId: number): Promise<void> {
     const game = await this.db.getGame(gameId);
     if (!game || game.phase !== "night" || game.status !== "running") return;
-    const alive = await this.db.getPlayers(game.id, true);
+    const allPlayers = await this.db.getPlayers(game.id);
+    const alive = allPlayers.filter((player) => player.alive === 1);
     for (const actor of alive) {
-      if (!actor.role) continue;
+      const role = effectiveNightRole(actor, allPlayers);
+      if (!nightActionsForRole(role, game.settings).length) continue;
       try {
-        for (const type of nightActionsForRole(actor.role, game.settings)) {
+        for (const type of nightActionsForRole(role, game.settings)) {
           const targets = await this.validTargets(type, actor, alive, game);
           if (!targets.length) continue;
           const oneTime = type === "don_check" || type === "commissar_check" || type === "commissar_shoot";
@@ -992,9 +1035,11 @@ export class GameEngine {
       ? await this.db.getPreviousTarget(game.id, actor.user_id, "doctor_heal", game.day)
       : undefined;
     return alive.filter((target) => {
-      if (type !== "doctor_heal" && target.user_id === actor.user_id) return false;
+      if (type !== "doctor_heal" && type !== "lawyer_defend" && type !== "mistress_visit" && target.user_id === actor.user_id) return false;
+      if (type === "mistress_visit" && target.user_id === actor.user_id) return false;
       if (type === "doctor_heal" && target.user_id === actor.user_id && !game.settings.doctorSelfHeal) return false;
-      if (type === "mafia_kill" && (target.role === "mafia" || target.role === "don")) return false;
+      if (type === "mafia_kill" && !game.settings.friendlyFire && isMafiaTeam(target.role)) return false;
+      if (type === "commissar_shoot" && !game.settings.friendlyFire && target.role === "sergeant") return false;
       if (type === "doctor_heal" && target.user_id === previousDoctorTarget) return false;
       return true;
     });
@@ -1067,39 +1112,58 @@ export class GameEngine {
     const actions = await this.db.getActions(game.id, game.day);
     const afkIds = await this.applyNightAfk(game, aliveBefore, actions);
 
-    const mafiaVotes = actions.filter((action) => {
-      if (action.type !== "mafia_kill" || !aliveIds.has(action.actor_id) || !aliveIds.has(action.target_id)) return false;
-      const actor = players.find((player) => player.user_id === action.actor_id);
-      const target = players.find((player) => player.user_id === action.target_id);
-      return !!actor && !!target && (actor.role === "mafia" || actor.role === "don") && target.role !== "mafia" && target.role !== "don";
-    });
-    const mafiaTarget = selectPluralityTarget(mafiaVotes.map((action) => action.target_id));
-    const maniacTarget = validSingleActionTarget(actions, players, aliveIds, "maniac_kill", "maniac");
-    const commissionerTarget = validSingleActionTarget(actions, players, aliveIds, "commissar_shoot", "commissar");
-    const healed = new Set(actions.filter((action) => {
-      const actor = players.find((player) => player.user_id === action.actor_id);
-      return action.type === "doctor_heal" && aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) && actor?.role === "doctor";
-    }).map((action) => action.target_id));
+    // Щиты Счастливчиков читаются только (фиксируются при сходе к стабильному решению).
+    const shield = new Map(players.filter((player) => player.alive === 1).map((player) => [player.user_id, player.lucky_shield]));
 
-    const attacked = new Set<string>();
-    if (mafiaTarget) attacked.add(mafiaTarget);
-    if (maniacTarget) attacked.add(maniacTarget);
-    if (commissionerTarget) attacked.add(commissionerTarget);
-    const attackDeaths = [...attacked].filter((id) => !healed.has(id));
+    let blocked = new Set<string>();
+    let effActions = actions;
+    let deathResult = computeNightDeaths(actions, players, aliveIds, shield);
+    for (let iter = 0; iter < 6; iter += 1) {
+      const nextBlocked = new Set<string>();
+      for (const act of actions) {
+        if (act.type !== "mistress_visit") continue;
+        const mistress = players.find((player) => player.user_id === act.actor_id);
+        if (!mistress || mistress.alive !== 1) continue;
+        if (deathResult.deaths.has(mistress.user_id)) continue; // сама Любовница убита — блок не срабатывает
+        nextBlocked.add(act.target_id);
+      }
+      const nextEff = actions.filter((action) =>
+        aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) &&
+        !deathResult.deaths.has(action.actor_id) && !nextBlocked.has(action.actor_id) &&
+        canPerform(players.find((player) => player.user_id === action.actor_id), action.type, players)
+      );
+      const nextDeath = computeNightDeaths(nextEff, players, aliveIds, shield);
+      const stable = sameSets(nextDeath.deaths, deathResult.deaths) && sameSets(nextBlocked, blocked);
+      blocked = nextBlocked;
+      effActions = nextEff;
+      deathResult = nextDeath;
+      if (stable) break;
+    }
+
+    const attackDeaths = [...deathResult.deaths];
     const killedIds = [...new Set([...attackDeaths, ...afkIds])];
     const revengeIds = await this.kamikazeNightRevenge(game.id, players, attackDeaths, killedIds);
     const allKilledIds = [...new Set([...killedIds, ...revengeIds])];
     await this.db.killPlayers(game.id, allKilledIds);
-    await this.sendBumReports(game, players, actions);
+
+    for (const id of deathResult.shieldBreaks) await this.db.setLuckyShield(game.id, id, 0);
+
+    await this.sendBumReports(game, players, effActions);
 
     const killed = allKilledIds.map((id) => players.find((player) => player.user_id === id)).filter(isPlayer);
     const afkSet = new Set(afkIds);
     const revengeSet = new Set(revengeIds);
-    const savedCount = [...attacked].filter((id) => healed.has(id)).length;
+    const savedCount = deathResult.savedCount;
+    const performedActions = actions.filter((action) => !blocked.has(action.actor_id));
+    const mafiaVotes = effActions.filter((action) => {
+      const actor = players.find((player) => player.user_id === action.actor_id);
+      return action.type === "mafia_kill" && !!actor && (actor.role === "mafia" || actor.role === "don");
+    });
+    const mafiaTarget = selectPluralityTarget(mafiaVotes.map((action) => action.target_id));
     const winner = determineWinner(await this.db.getPlayers(game.id, true));
     if (winner) {
       await this.cleanupPhaseMessages(game);
-      await this.sendMorningSummary(game, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, actions);
+      await this.sendMorningSummary(game, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, performedActions);
       await this.finishGame(game, winner);
       return;
     }
@@ -1109,7 +1173,7 @@ export class GameEngine {
     const current = (await this.db.getGame(game.id))!;
     await this.cleanupPhaseMessages(current);
     await this.sendPhaseMedia(current, "day", `🌇 <b>День ${game.day}</b> · город просыпается`);
-    await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, actions);
+    await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, performedActions);
     await this.sendTracked(current, [alivePlayersText(await this.db.getPlayers(game.id, true)), "", `💬 Обсуждение: <b>${game.settings.daySeconds} сек.</b>`].join("\n"));
     this.schedulePhase(game.id, endsAt);
   }
@@ -1160,13 +1224,21 @@ export class GameEngine {
     if (!game.settings.afkLimit) return [];
     const inactive: string[] = [];
     for (const player of players) {
-      if (!player.role || player.role === "citizen") continue;
+      if (!player.role) continue;
+      const role = effectiveNightRole(player, players);
+      if (!nightActionsForRole(role, game.settings).length) continue;
       const acted = actions.some((action) => action.actor_id === player.user_id);
       const strikes = acted ? 0 : player.afk_strikes + 1;
       await this.db.setAfkStrikes(game.id, player.user_id, strikes);
       if (!acted && strikes >= game.settings.afkLimit) inactive.push(player.user_id);
     }
     return inactive;
+  }
+
+  private async lawyerDefended(gameId: number, day: number, targetId: string): Promise<boolean> {
+    const lawyerDefend = await this.db.getActions(gameId, day, "lawyer_defend");
+    const alive = (await this.db.getPlayers(gameId, true)).map((player) => player.user_id);
+    return lawyerDefend.some((action) => action.target_id === targetId && alive.includes(action.actor_id));
   }
 
   private async sendBumReports(game: GameRow, players: PlayerRow[], actions: ActionRow[]): Promise<void> {
@@ -1337,7 +1409,9 @@ export class GameEngine {
     const afkIds: string[] = [];
     if (game.settings.afkLimit) {
       const voters = new Set(votes.map((vote) => vote.voter_id));
+      const blocked = nightBlockedUsers(await this.db.getActions(game.id, game.day), await this.db.getPlayers(game.id));
       for (const player of alive) {
+        if (blocked.has(player.user_id)) continue;
         const voted = voters.has(player.user_id);
         const strikes = voted ? 0 : player.afk_strikes + 1;
         await this.db.setAfkStrikes(game.id, player.user_id, strikes);
@@ -1396,6 +1470,14 @@ export class GameEngine {
   }
 
   private async eliminateVotedPlayer(game: GameRow, player: PlayerRow): Promise<void> {
+    if (player.role === "suicide") {
+      await this.db.killPlayers(game.id, [player.user_id]);
+      await this.db.setPendingElimination(game.id, null);
+      await this.cleanupPhaseMessages(game);
+      await this.sendTracked(game, `💀 ${mention(player)} раскрывает свою сущность: город казнил Самоубийцу — он(а) победил(а)!`);
+      await this.finishGame(game, "suicide");
+      return;
+    }
     const revengeId = await this.kamikazeVoteRevenge(game, player);
     const revenge = revengeId ? await this.db.getPlayer(game.id, revengeId) : undefined;
     await this.db.killPlayers(game.id, [player.user_id, ...(revenge ? [revenge.user_id] : [])]);
@@ -1447,7 +1529,11 @@ export class GameEngine {
     await this.cleanupPhaseMessages(game);
     const players = await this.db.getPlayers(game.id);
     const { winners, others } = groupEndGamePlayers(players, winner);
-    const winnerLine = winner === "town" ? "Мирные жители" : winner === "mafia" ? "Мафия" : "Маньяк";
+    const winnerLine = winner === "town" ? "Мирные жители"
+      : winner === "mafia" ? "Мафия"
+      : winner === "maniac" ? "Маньяк"
+      : winner === "suicide" ? "Самоубийца"
+      : "Любовница";
 
     const lines: string[] = [
       "<b>Игра окончена!</b>",
@@ -1528,6 +1614,11 @@ function nightActionsForRole(role: Role, settings: GameSettings): ActionType[] {
     case "maniac": return ["maniac_kill"];
     case "bum": return ["bum_visit"];
     case "kamikaze": return [];
+    case "sergeant": return [];
+    case "lawyer": return ["lawyer_defend"];
+    case "lucky": return [];
+    case "suicide": return [];
+    case "mistress": return ["mistress_visit"];
     case "citizen": return [];
   }
 }
@@ -1542,6 +1633,8 @@ function nightFlavorIntro(type: ActionType, actor: PlayerRow): string {
     case "doctor_heal": return `👨‍⚕️ <b>Доктор</b> вышел на ночное дежурство…`;
     case "maniac_kill": return `🪓 <b>Маньяк</b> выходит на охоту…`;
     case "bum_visit": return `🍾 <b>Бомж</b> отправился в гости…`;
+    case "lawyer_defend": return `🎩 <b>Адвокат</b> готовит алиби своему подзащитному…`;
+    case "mistress_visit": return `💋 <b>Любовница</b> выбирает, кого навестить этой ночью…`;
   }
 }
 
@@ -1578,10 +1671,13 @@ function settingsKeyboard(settings: GameSettings): InlineKeyboardMarkup {
     [Markup.button.callback(`${flag(settings.nominationsEnabled)} Кандидатуры`, "cfg:nominations"), Markup.button.callback(`${flag(settings.revealDeadRoles)} Роли`, "cfg:reveal")],
     [Markup.button.callback(`${flag(settings.doctorSelfHeal)} Самолечение`, "cfg:selfheal"), Markup.button.callback(`${flag(settings.commissionerCanShoot)} Выстрел`, "cfg:shoot")],
     [Markup.button.callback(`${flag(settings.allowSelfVote)} За себя`, "cfg:selfvote"), Markup.button.callback(`${flag(settings.allowSkipVote)} Пропуск`, "cfg:skip")],
-    [Markup.button.callback(`${flag(settings.autoDeleteMessages)} Автоудаление`, "cfg:autodelete")],
+    [Markup.button.callback(`${flag(settings.autoDeleteMessages)} Автоудаление`, "cfg:autodelete"), Markup.button.callback(`${flag(settings.friendlyFire)} Огонь по своим`, "cfg:friendly")],
     [Markup.button.callback(`${flag(settings.roles.don)} Дон`, "cfg:role_don"), Markup.button.callback(`${flag(settings.roles.commissar)} Комиссар`, "cfg:role_commissar")],
     [Markup.button.callback(`${flag(settings.roles.doctor)} Доктор`, "cfg:role_doctor"), Markup.button.callback(`${flag(settings.roles.maniac)} Маньяк`, "cfg:role_maniac")],
-    [Markup.button.callback(`${flag(settings.roles.bum)} Бомж`, "cfg:role_bum"), Markup.button.callback(`${flag(settings.roles.kamikaze)} Камикадзе`, "cfg:role_kamikaze")]
+    [Markup.button.callback(`${flag(settings.roles.bum)} Бомж`, "cfg:role_bum"), Markup.button.callback(`${flag(settings.roles.kamikaze)} Камикадзе`, "cfg:role_kamikaze")],
+    [Markup.button.callback(`${flag(settings.roles.sergeant)} Сержант`, "cfg:role_sergeant"), Markup.button.callback(`${flag(settings.roles.lawyer)} Адвокат`, "cfg:role_lawyer")],
+    [Markup.button.callback(`${flag(settings.roles.lucky)} Счастливчик`, "cfg:role_lucky"), Markup.button.callback(`${flag(settings.roles.suicide)} Самоубийца`, "cfg:role_suicide")],
+    [Markup.button.callback(`${flag(settings.roles.mistress)} Любовница`, "cfg:role_mistress")]
   ]).reply_markup;
 }
 
@@ -1624,20 +1720,107 @@ function mutateSetting(settings: GameSettings, key: string): void {
     case "selfvote": settings.allowSelfVote = !settings.allowSelfVote; break;
     case "skip": settings.allowSkipVote = !settings.allowSkipVote; break;
     case "autodelete": settings.autoDeleteMessages = !settings.autoDeleteMessages; break;
+    case "friendly": settings.friendlyFire = !settings.friendlyFire; break;
     case "role_don": settings.roles.don = !settings.roles.don; break;
     case "role_commissar": settings.roles.commissar = !settings.roles.commissar; break;
     case "role_doctor": settings.roles.doctor = !settings.roles.doctor; break;
     case "role_maniac": settings.roles.maniac = !settings.roles.maniac; break;
     case "role_bum": settings.roles.bum = !settings.roles.bum; break;
     case "role_kamikaze": settings.roles.kamikaze = !settings.roles.kamikaze; break;
+    case "role_sergeant": settings.roles.sergeant = !settings.roles.sergeant; break;
+    case "role_lawyer": settings.roles.lawyer = !settings.roles.lawyer; break;
+    case "role_lucky": settings.roles.lucky = !settings.roles.lucky; break;
+    case "role_suicide": settings.roles.suicide = !settings.roles.suicide; break;
+    case "role_mistress": settings.roles.mistress = !settings.roles.mistress; break;
   }
 }
 
 function validSingleActionTarget(actions: ActionRow[], players: PlayerRow[], aliveIds: Set<string>, type: ActionType, role: Role): string | null {
   return actions.find((action) => {
     const actor = players.find((player) => player.user_id === action.actor_id);
-    return action.type === type && aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) && actor?.role === role;
+    return action.type === type && aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) && effectiveNightRole(actor!, players) === role;
   })?.target_id ?? null;
+}
+
+function effectiveNightRole(player: PlayerRow, players: PlayerRow[]): Role {
+  if (player.role === "commissar") return "commissar";
+  if (player.role === "sergeant") {
+    const commissarAlive = players.some((candidate) => candidate.role === "commissar" && candidate.alive === 1);
+    if (!commissarAlive) return "commissar";
+  }
+  return player.role ?? "citizen";
+}
+
+function isMafiaTeam(role: Role | null): boolean {
+  return role === "mafia" || role === "don" || role === "lawyer";
+}
+
+function canPerform(actor: PlayerRow | undefined, type: ActionType, players: PlayerRow[]): boolean {
+  if (!actor) return false;
+  return ACTION_ROLE[type].includes(effectiveNightRole(actor, players));
+}
+
+function computeNightDeaths(
+  effActions: ActionRow[],
+  players: PlayerRow[],
+  aliveIds: Set<string>,
+  shield: Map<string, number>
+): { deaths: Set<string>; savedCount: number; shieldBreaks: Set<string> } {
+  const doctorHealed = new Set<string>();
+  for (const action of effActions) {
+    if (action.type !== "doctor_heal") continue;
+    const doctor = players.find((player) => player.user_id === action.actor_id);
+    if (doctor?.role === "doctor" && doctor.alive === 1 && aliveIds.has(action.target_id)) {
+      doctorHealed.add(action.target_id);
+    }
+  }
+
+  const mafiaVotes = effActions.filter((action) => {
+    if (action.type !== "mafia_kill") return false;
+    const actor = players.find((player) => player.user_id === action.actor_id);
+    return !!actor && (actor.role === "mafia" || actor.role === "don") && actor.alive === 1;
+  });
+  const mafiaTarget = selectPluralityTarget(mafiaVotes.map((action) => action.target_id));
+  const maniacTarget = validSingleActionTarget(effActions, players, aliveIds, "maniac_kill", "maniac");
+  const commissionerTarget = validSingleActionTarget(effActions, players, aliveIds, "commissar_shoot", "commissar");
+
+  const attacked = new Set<string>();
+  if (mafiaTarget) attacked.add(mafiaTarget);
+  if (maniacTarget) attacked.add(maniacTarget);
+  if (commissionerTarget) attacked.add(commissionerTarget);
+
+  const deaths = new Set<string>();
+  const shieldBreaks = new Set<string>();
+  let savedCount = 0;
+  for (const id of attacked) {
+    if (doctorHealed.has(id)) {
+      savedCount += 1;
+      continue;
+    }
+    const target = players.find((player) => player.user_id === id);
+    if (target && (shield.get(id) ?? 0) > 0) {
+      shieldBreaks.add(id);
+      continue;
+    }
+    deaths.add(id);
+  }
+  return { deaths, savedCount, shieldBreaks };
+}
+
+function nightBlockedUsers(actions: ActionRow[], players: PlayerRow[]): Set<string> {
+  const blocked = new Set<string>();
+  for (const action of actions) {
+    if (action.type !== "mistress_visit") continue;
+    const mistress = players.find((player) => player.user_id === action.actor_id);
+    if (mistress && mistress.alive === 1) blocked.add(action.target_id);
+  }
+  return blocked;
+}
+
+function sameSets(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) if (!b.has(value)) return false;
+  return true;
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -1674,11 +1857,14 @@ function groupEndGamePlayers(players: PlayerRow[], winner: Winner): { winners: P
   for (const player of players) {
     const role = player.role;
     const side = role ? ROLES[role].side : null;
-    const onWinningSide = player.alive === 1 && (
-      (winner === "town" && side === "town") ||
-      (winner === "mafia" && (role === "mafia" || role === "don")) ||
-      (winner === "maniac" && role === "maniac")
-    );
+    let onWinningSide = false;
+    switch (winner) {
+      case "town": onWinningSide = player.alive === 1 && side === "town"; break;
+      case "mafia": onWinningSide = player.alive === 1 && (role === "mafia" || role === "don" || role === "lawyer"); break;
+      case "maniac": onWinningSide = player.alive === 1 && role === "maniac"; break;
+      case "mistress": onWinningSide = player.alive === 1 && role === "mistress"; break;
+      case "suicide": onWinningSide = role === "suicide"; break;
+    }
     (onWinningSide ? winners : others).push(player);
   }
   return { winners, others };

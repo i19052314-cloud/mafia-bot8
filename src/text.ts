@@ -29,6 +29,11 @@ export function roleDescription(role: Role): string {
     case "maniac": return "Каждую ночь выбирайте жертву. Вы победите, если останетесь единственным выжившим.";
     case "bum": return "Ночью идите в гости к игроку и узнавайте, кто ещё к нему приходил.";
     case "kamikaze": return "Если вас изгонят или убьют, вы утянете с собой одного из тех, кто голосовал против вас.";
+    case "sergeant": return "Напарник Комиссара: вы видите результаты его проверок. Если Комиссар погибнет, следующей ночью вы примете его роль.";
+    case "lawyer": return "Пособник мафии, но вы не знаете клан. Ночью выберите подзащитного: если его проверят, он покажется Мирным жителем.";
+    case "lucky": return "У вас пассивный щит: вы переживаете первое смертельное ночное нападение. Щит ломается, при следующей атаке или казни вы погибаете.";
+    case "suicide": return "Вы побеждаете, только если город казнит вас на дневном голосовании. Ночью вы не действуете.";
+    case "mistress": return "Ночью вы навещаете игрока: он теряет ночное действие и не может голосовать днём. Если вас убьют ночью, блок не срабатывает.";
   }
 }
 
@@ -62,6 +67,8 @@ export function winnerText(winner: Winner): string {
     case "town": return "🏆 <b>Мирный город победил!</b>\nВсе представители мафии и Маньяк выбыли.";
     case "mafia": return "🔪 <b>Мафия победила!</b>\nПреступники захватили город.";
     case "maniac": return "🪓 <b>Маньяк победил!</b>\nОн остался единственным выжившим.";
+    case "suicide": return "💀 <b>Самоубийца победил!</b>\nГород казнил его, сыграв его игру.";
+    case "mistress": return "💋 <b>Любовница победила!</b>\nОна осталась последней, оставив город во тьме.";
   }
 }
 
@@ -72,7 +79,12 @@ export function settingsText(settings: GameSettings): string {
     settings.roles.doctor && "Доктор",
     settings.roles.maniac && "Маньяк",
     settings.roles.bum && "Бомж",
-    settings.roles.kamikaze && "Камикадзе"
+    settings.roles.kamikaze && "Камикадзе",
+    settings.roles.sergeant && "Сержант",
+    settings.roles.lawyer && "Адвокат",
+    settings.roles.lucky && "Счастливчик",
+    settings.roles.suicide && "Самоубийца",
+    settings.roles.mistress && "Любовница"
   ].filter(Boolean).join(", ");
   return [
     "⚙️ <b>Настройки игры</b>",
@@ -88,6 +100,7 @@ export function settingsText(settings: GameSettings): string {
     `${flag(settings.allowSelfVote)} Голосование за себя`,
     `${flag(settings.allowSkipVote)} Вариант «пропустить»`,
     `${flag(settings.autoDeleteMessages)} Удалять сообщения прошлой фазы`,
+    `${flag(settings.friendlyFire)} Огонь по своим (Friendly Fire)`,
     `${settings.afkLimit > 0 ? "✅" : "❌"} AFK: ${settings.afkLimit > 0 ? `${settings.afkLimit} пропуска` : "отключён"}`,
     "",
     "Настройки применяются к текущему набору и следующим играм. Уже начатая игра не меняется."

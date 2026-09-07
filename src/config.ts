@@ -36,13 +36,19 @@ export function defaultGameSettings(): GameSettings {
     nominationsEnabled: boolean("NOMINATIONS_ENABLED", true),
     afkLimit: integer("AFK_LIMIT", 2, 0, 10),
     autoDeleteMessages: boolean("AUTO_DELETE_MESSAGES", false),
+    friendlyFire: boolean("FRIENDLY_FIRE", false),
     roles: {
       don: boolean("ROLE_DON", true),
       commissar: boolean("ROLE_COMMISSAR", true),
       doctor: boolean("ROLE_DOCTOR", true),
       maniac: boolean("ROLE_MANIAC", true),
       bum: boolean("ROLE_BUM", true),
-      kamikaze: boolean("ROLE_KAMIKAZE", true)
+      kamikaze: boolean("ROLE_KAMIKAZE", true),
+      sergeant: boolean("ROLE_SERGEANT", true),
+      lawyer: boolean("ROLE_LAWYER", true),
+      lucky: boolean("ROLE_LUCKY", true),
+      suicide: boolean("ROLE_SUICIDE", true),
+      mistress: boolean("ROLE_MISTRESS", true)
     }
   };
 }

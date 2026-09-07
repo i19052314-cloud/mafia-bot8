@@ -6,7 +6,12 @@ export const ROLES = {
   doctor: { title: "Доктор", emoji: "👨‍⚕️", side: "town" },
   maniac: { title: "Маньяк", emoji: "🪓", side: "neutral" },
   bum: { title: "Бомж", emoji: "🧔", side: "town" },
-  kamikaze: { title: "Камикадзе", emoji: "💣", side: "town" }
+  kamikaze: { title: "Камикадзе", emoji: "💣", side: "town" },
+  sergeant: { title: "Сержант", emoji: "🎖️", side: "town" },
+  lawyer: { title: "Адвокат", emoji: "🎩", side: "mafia" },
+  lucky: { title: "Счастливчик", emoji: "🍀", side: "town" },
+  suicide: { title: "Самоубийца", emoji: "💀", side: "neutral" },
+  mistress: { title: "Любовница", emoji: "💋", side: "neutral" }
 } as const;
 
 export type Role = keyof typeof ROLES;
@@ -21,8 +26,10 @@ export type ActionType =
   | "commissar_shoot"
   | "doctor_heal"
   | "maniac_kill"
-  | "bum_visit";
-export type Winner = "town" | "mafia" | "maniac";
+  | "bum_visit"
+  | "lawyer_defend"
+  | "mistress_visit";
+export type Winner = "town" | "mafia" | "maniac" | "suicide" | "mistress";
 
 export interface RoleSettings {
   don: boolean;
@@ -31,6 +38,11 @@ export interface RoleSettings {
   maniac: boolean;
   bum: boolean;
   kamikaze: boolean;
+  sergeant: boolean;
+  lawyer: boolean;
+  lucky: boolean;
+  suicide: boolean;
+  mistress: boolean;
 }
 
 export interface GameSettings {
@@ -49,6 +61,7 @@ export interface GameSettings {
   nominationsEnabled: boolean;
   afkLimit: number;
   autoDeleteMessages: boolean;
+  friendlyFire: boolean;
   roles: RoleSettings;
 }
 
@@ -80,6 +93,7 @@ export interface PlayerRow {
   role: Role | null;
   alive: number;
   afk_strikes: number;
+  lucky_shield: number;
   joined_at: number;
 }
 

@@ -97,6 +97,11 @@ async function main(): Promise<void> {
       "👨‍⚕️ <b>Доктор</b> спасает от всех атак и не лечит одну цель две ночи подряд.",
       "🪓 <b>Маньяк</b> действует один и стремится остаться последним.",
       "🧔 <b>Бомж</b> видит гостей выбранного игрока.",
+      "🎖️ <b>Сержант</b> — напарник Комиссара, наследует его роль после гибели.",
+      "🎩 <b>Адвокат</b> укрывает подзащитного от проверки.",
+      "🍀 <b>Счастливчик</b> переживает первое ночное нападение.",
+      "💀 <b>Самоубийца</b> побеждает, если город казнит его.",
+      "💋 <b>Любовница</b> блокирует ночное действие и голос цели.",
       "👨 <b>Мирные</b> ищут преступников голосованием.",
       "",
       "Пропуски действий учитывает AFK-система. Точные правила группы показаны в /settings."
@@ -156,7 +161,7 @@ async function main(): Promise<void> {
     (ctx) => engine.handleNomination(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
   bot.action(/^vote:(\d+):(\d+):(skip|-?\d+)$/,
     (ctx) => engine.handleVote(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
-  bot.action(/^act:(\d+):(\d+):(mafia_kill|don_check|commissar_check|commissar_shoot|doctor_heal|maniac_kill|bum_visit):(-?\d+)$/,
+  bot.action(/^act:(\d+):(\d+):(mafia_kill|don_check|commissar_check|commissar_shoot|doctor_heal|maniac_kill|bum_visit|lawyer_defend|mistress_visit):(-?\d+)$/,
     (ctx) => engine.handleNightAction(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3] as ActionType, ctx.match[4]!));
 
   let lastOwnerAlert = 0;

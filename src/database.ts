@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { ROLES } from "./types.js";
 import type {
   ActionRow,
   ActionType,
@@ -64,7 +65,7 @@ export class GameDatabase {
         paused_remaining_ms DOUBLE PRECISION,
         pending_elimination_id TEXT,
         lobby_message_id INTEGER,
-        winner TEXT CHECK (winner IS NULL OR winner IN ('town','mafia','maniac')),
+        winner TEXT CHECK (winner IS NULL OR winner IN ('town','mafia','maniac','suicide','mistress')),
         settings JSONB NOT NULL,
         created_at DOUBLE PRECISION NOT NULL,
         started_at DOUBLE PRECISION,
@@ -81,18 +82,21 @@ export class GameDatabase {
         user_id TEXT NOT NULL,
         username TEXT,
         first_name TEXT NOT NULL,
-        role TEXT CHECK (role IS NULL OR role IN ('citizen','mafia','don','commissar','doctor','maniac','bum','kamikaze')),
+        role TEXT CHECK (role IS NULL OR role IN ('citizen','mafia','don','commissar','doctor','maniac','bum','kamikaze','sergeant','lawyer','lucky','suicide','mistress')),
         alive INTEGER NOT NULL DEFAULT 1,
         afk_strikes INTEGER NOT NULL DEFAULT 0,
+        lucky_shield INTEGER NOT NULL DEFAULT 0,
         joined_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (game_id, user_id)
       );
+
+      ALTER TABLE game_players ADD COLUMN IF NOT EXISTS lucky_shield INTEGER NOT NULL DEFAULT 0;
 
       CREATE TABLE IF NOT EXISTS actions (
         game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
         day INTEGER NOT NULL,
         actor_id TEXT NOT NULL,
-        type TEXT NOT NULL CHECK (type IN ('mafia_kill','don_check','commissar_check','commissar_shoot','doctor_heal','maniac_kill','bum_visit')),
+        type TEXT NOT NULL CHECK (type IN ('mafia_kill','don_check','commissar_check','commissar_shoot','doctor_heal','maniac_kill','bum_visit','lawyer_defend','mistress_visit')),
         target_id TEXT NOT NULL,
         created_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (game_id, day, actor_id, type)
@@ -268,9 +272,13 @@ export class GameDatabase {
   async assignRoles(gameId: number, assignments: Map<string, Role>): Promise<void> {
     await this.transaction(async (client) => {
       for (const [userId, role] of assignments) {
-        await client.query("UPDATE game_players SET role = $1, alive = 1, afk_strikes = 0 WHERE game_id = $2 AND user_id = $3", [role, gameId, userId]);
+        await client.query("UPDATE game_players SET role = $1, alive = 1, afk_strikes = 0, lucky_shield = CASE WHEN $1::text = 'lucky' THEN 1 ELSE 0 END WHERE game_id = $2 AND user_id = $3", [role, gameId, userId]);
       }
     });
+  }
+
+  async setLuckyShield(gameId: number, userId: string, value: number): Promise<void> {
+    await this.pool.query("UPDATE game_players SET lucky_shield = $1 WHERE game_id = $2 AND user_id = $3", [value, gameId, userId]);
   }
 
   async setPhase(gameId: number, phase: Phase, day: number, endsAt: number | null): Promise<void> {
@@ -420,11 +428,7 @@ export class GameDatabase {
       `, [winner, Date.now(), gameId]);
 
       for (const player of players) {
-        const won = player.role === "maniac"
-          ? winner === "maniac"
-          : player.role === "mafia" || player.role === "don"
-            ? winner === "mafia"
-            : winner === "town";
+        const won = roleWon(player.role, winner);
         await client.query(`
           UPDATE user_stats SET games = games + 1, wins = wins + $1,
             town_wins = town_wins + $2, mafia_wins = mafia_wins + $3,
@@ -672,6 +676,17 @@ function normalizeGame(row: Record<string, unknown>): GameRow {
     updated_at: Number(row.updated_at),
     settings: normalizeSettings(row.settings, undefined)
   } as GameRow;
+}
+
+function roleWon(role: Role | null, winner: Winner): boolean {
+  if (!role) return false;
+  switch (winner) {
+    case "town": return ROLES[role].side === "town";
+    case "mafia": return role === "mafia" || role === "don" || role === "lawyer";
+    case "maniac": return role === "maniac";
+    case "suicide": return role === "suicide";
+    case "mistress": return role === "mistress";
+  }
 }
 
 function normalizeProfile(row: Record<string, unknown>): UserProfile {
