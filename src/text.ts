@@ -28,6 +28,7 @@ export function roleDescription(role: Role): string {
     case "doctor": return "Каждую ночь спасайте одного игрока от всех атак. Одну цель нельзя лечить две ночи подряд.";
     case "maniac": return "Каждую ночь выбирайте жертву. Вы победите, если останетесь единственным выжившим.";
     case "bum": return "Ночью идите в гости к игроку и узнавайте, кто ещё к нему приходил.";
+    case "kamikaze": return "Если вас изгонят или убьют, вы утянете с собой одного из тех, кто голосовал против вас.";
   }
 }
 
@@ -70,7 +71,8 @@ export function settingsText(settings: GameSettings): string {
     settings.roles.commissar && "Комиссар",
     settings.roles.doctor && "Доктор",
     settings.roles.maniac && "Маньяк",
-    settings.roles.bum && "Бомж"
+    settings.roles.bum && "Бомж",
+    settings.roles.kamikaze && "Камикадзе"
   ].filter(Boolean).join(", ");
   return [
     "⚙️ <b>Настройки игры</b>",

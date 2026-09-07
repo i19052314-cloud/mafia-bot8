@@ -81,7 +81,7 @@ export class GameDatabase {
         user_id TEXT NOT NULL,
         username TEXT,
         first_name TEXT NOT NULL,
-        role TEXT CHECK (role IS NULL OR role IN ('citizen','mafia','don','commissar','doctor','maniac','bum')),
+        role TEXT CHECK (role IS NULL OR role IN ('citizen','mafia','don','commissar','doctor','maniac','bum','kamikaze')),
         alive INTEGER NOT NULL DEFAULT 1,
         afk_strikes INTEGER NOT NULL DEFAULT 0,
         joined_at DOUBLE PRECISION NOT NULL,

@@ -41,7 +41,8 @@ export function defaultGameSettings(): GameSettings {
       commissar: boolean("ROLE_COMMISSAR", true),
       doctor: boolean("ROLE_DOCTOR", true),
       maniac: boolean("ROLE_MANIAC", true),
-      bum: boolean("ROLE_BUM", true)
+      bum: boolean("ROLE_BUM", true),
+      kamikaze: boolean("ROLE_KAMIKAZE", true)
     }
   };
 }

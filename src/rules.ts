@@ -19,7 +19,8 @@ export function buildRoleDeck(playerCount: number, settings: GameSettings): Role
     ["commissar", settings.roles.commissar, 5],
     ["doctor", settings.roles.doctor, 5],
     ["bum", settings.roles.bum, 7],
-    ["maniac", settings.roles.maniac, 8]
+    ["maniac", settings.roles.maniac, 8],
+    ["kamikaze", settings.roles.kamikaze, 8]
   ];
   for (const [role, enabled, threshold] of optional) {
     if (enabled && playerCount >= threshold && roles.length < playerCount) roles.push(role);

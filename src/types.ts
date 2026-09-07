@@ -5,7 +5,8 @@ export const ROLES = {
   commissar: { title: "Комиссар", emoji: "👮", side: "town" },
   doctor: { title: "Доктор", emoji: "👨‍⚕️", side: "town" },
   maniac: { title: "Маньяк", emoji: "🪓", side: "neutral" },
-  bum: { title: "Бомж", emoji: "🧔", side: "town" }
+  bum: { title: "Бомж", emoji: "🧔", side: "town" },
+  kamikaze: { title: "Камикадзе", emoji: "💣", side: "town" }
 } as const;
 
 export type Role = keyof typeof ROLES;
@@ -29,6 +30,7 @@ export interface RoleSettings {
   doctor: boolean;
   maniac: boolean;
   bum: boolean;
+  kamikaze: boolean;
 }
 
 export interface GameSettings {

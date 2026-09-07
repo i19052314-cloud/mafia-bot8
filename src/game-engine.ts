@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { Markup, type Context, type Telegraf } from "telegraf";
 import type { InlineKeyboardMarkup } from "telegraf/types";
 import type { GameDatabase, TelegramUserData } from "./database.js";
@@ -1039,16 +1040,19 @@ export class GameEngine {
     if (commissionerTarget) attacked.add(commissionerTarget);
     const attackDeaths = [...attacked].filter((id) => !healed.has(id));
     const killedIds = [...new Set([...attackDeaths, ...afkIds])];
-    await this.db.killPlayers(game.id, killedIds);
+    const revengeIds = await this.kamikazeNightRevenge(game.id, players, attackDeaths, killedIds);
+    const allKilledIds = [...new Set([...killedIds, ...revengeIds])];
+    await this.db.killPlayers(game.id, allKilledIds);
     await this.sendBumReports(game, players, actions);
 
-    const killed = killedIds.map((id) => players.find((player) => player.user_id === id)).filter(isPlayer);
+    const killed = allKilledIds.map((id) => players.find((player) => player.user_id === id)).filter(isPlayer);
     const afkSet = new Set(afkIds);
+    const revengeSet = new Set(revengeIds);
     const savedCount = [...attacked].filter((id) => healed.has(id)).length;
     const winner = determineWinner(await this.db.getPlayers(game.id, true));
     if (winner) {
       await this.cleanupPhaseMessages(game);
-      await this.sendMorningSummary(game, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length);
+      await this.sendMorningSummary(game, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet);
       await this.finishGame(game, winner);
       return;
     }
@@ -1058,17 +1062,20 @@ export class GameEngine {
     const current = (await this.db.getGame(game.id))!;
     await this.cleanupPhaseMessages(current);
     await this.sendPhaseMedia(current, "day", `🌇 <b>День ${game.day}</b> · город просыпается`);
-    await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length);
+    await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet);
     await this.sendTracked(current, [alivePlayersText(await this.db.getPlayers(game.id, true)), "", `💬 Обсуждение: <b>${game.settings.daySeconds} сек.</b>`].join("\n"));
     this.schedulePhase(game.id, endsAt);
   }
 
-  private async sendMorningSummary(game: GameRow, killed: PlayerRow[], afkSet: Set<string>, savedCount: number, mafiaTarget: string | null, mafiaVotes: number): Promise<void> {
+  private async sendMorningSummary(game: GameRow, killed: PlayerRow[], afkSet: Set<string>, savedCount: number, mafiaTarget: string | null, mafiaVotes: number, revengeSet: Set<string>): Promise<void> {
     const lines = ["🌇 <b>Итоги ночи</b>"];
-    const attackedKilled = killed.filter((player) => !afkSet.has(player.user_id));
-    if (!attackedKilled.length) lines.push("Город проснулся без жертв нападений.");
+    const attackedKilled = killed.filter((player) => !afkSet.has(player.user_id) && !revengeSet.has(player.user_id));
+    if (!attackedKilled.length && !revengeSet.size) lines.push("Город проснулся без жертв нападений.");
     for (const victim of attackedKilled) {
       lines.push(`Убит(а) ${mention(victim)}${game.settings.revealDeadRoles && victim.role ? ` — ${roleLabel(victim.role)}` : ""}.`);
+    }
+    for (const victim of killed.filter((player) => revengeSet.has(player.user_id))) {
+      lines.push(`💣 Камикадзе утянул(а) с собой ${mention(victim)}${game.settings.revealDeadRoles && victim.role ? ` — ${roleLabel(victim.role)}` : ""}.`);
     }
     for (const player of killed.filter((item) => afkSet.has(item.user_id))) {
       lines.push(`💤 ${mention(player)} выбыл(а) за бездействие${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
@@ -1107,6 +1114,30 @@ export class GameEngine {
         this.logger.warn(`Не удалось отправить отчёт Бомжу ${visit.actor_id}`, error);
       }
     }
+  }
+
+  private async kamikazeNightRevenge(gameId: number, players: PlayerRow[], attackDeaths: string[], excludeIds: string[]): Promise<string[]> {
+    const revengeIds: string[] = [];
+    const unavailable = new Set(excludeIds);
+    for (const deadId of attackDeaths) {
+      const dead = players.find((player) => player.user_id === deadId);
+      if (!dead || dead.role !== "kamikaze") continue;
+      const candidates = players.filter((player) => player.alive === 1 && !unavailable.has(player.user_id) && player.user_id !== deadId);
+      if (!candidates.length) continue;
+      const victim = candidates[randomInt(candidates.length)]!;
+      revengeIds.push(victim.user_id);
+      unavailable.add(victim.user_id);
+    }
+    return revengeIds;
+  }
+
+  private async kamikazeVoteRevenge(game: GameRow, player: PlayerRow): Promise<string | null> {
+    if (player.role !== "kamikaze") return null;
+    const aliveIds = new Set((await this.db.getPlayers(game.id, true)).map((item) => item.user_id));
+    const votes = (await this.db.getVotes(game.id, game.day)).filter((vote) => vote.target_id === player.user_id && aliveIds.has(vote.voter_id));
+    const voters = votes.filter((vote) => vote.voter_id !== player.user_id).map((vote) => vote.voter_id);
+    if (!voters.length) return null;
+    return voters[randomInt(voters.length)]!;
   }
 
   private async openNominations(game: GameRow): Promise<void> {
@@ -1294,10 +1325,16 @@ export class GameEngine {
   }
 
   private async eliminateVotedPlayer(game: GameRow, player: PlayerRow): Promise<void> {
-    await this.db.killPlayers(game.id, [player.user_id]);
+    const revengeId = await this.kamikazeVoteRevenge(game, player);
+    const revenge = revengeId ? await this.db.getPlayer(game.id, revengeId) : undefined;
+    await this.db.killPlayers(game.id, [player.user_id, ...(revenge ? [revenge.user_id] : [])]);
     await this.db.setPendingElimination(game.id, null);
     await this.cleanupPhaseMessages(game);
-    await this.sendTracked(game, `${mention(player)} покидает город${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
+    const playerLine = `${mention(player)} покидает город${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`;
+    const revengeLine = revenge
+      ? `\n💣 Камикадзе утянул(а) с собой ${mention(revenge)}${game.settings.revealDeadRoles && revenge.role ? ` — ${roleLabel(revenge.role)}` : ""}.`
+      : "";
+    await this.sendTracked(game, playerLine + revengeLine);
     const winner = determineWinner(await this.db.getPlayers(game.id, true));
     if (winner) await this.finishGame(game, winner);
     else await this.startNextNight(game.id, game.day + 1);
@@ -1419,6 +1456,7 @@ function nightActionsForRole(role: Role, settings: GameSettings): ActionType[] {
     case "doctor": return ["doctor_heal"];
     case "maniac": return ["maniac_kill"];
     case "bum": return ["bum_visit"];
+    case "kamikaze": return [];
     case "citizen": return [];
   }
 }
@@ -1459,7 +1497,7 @@ function settingsKeyboard(settings: GameSettings): InlineKeyboardMarkup {
     [Markup.button.callback(`${flag(settings.autoDeleteMessages)} Автоудаление`, "cfg:autodelete")],
     [Markup.button.callback(`${flag(settings.roles.don)} Дон`, "cfg:role_don"), Markup.button.callback(`${flag(settings.roles.commissar)} Комиссар`, "cfg:role_commissar")],
     [Markup.button.callback(`${flag(settings.roles.doctor)} Доктор`, "cfg:role_doctor"), Markup.button.callback(`${flag(settings.roles.maniac)} Маньяк`, "cfg:role_maniac")],
-    [Markup.button.callback(`${flag(settings.roles.bum)} Бомж`, "cfg:role_bum")]
+    [Markup.button.callback(`${flag(settings.roles.bum)} Бомж`, "cfg:role_bum"), Markup.button.callback(`${flag(settings.roles.kamikaze)} Камикадзе`, "cfg:role_kamikaze")]
   ]).reply_markup;
 }
 
@@ -1507,6 +1545,7 @@ function mutateSetting(settings: GameSettings, key: string): void {
     case "role_doctor": settings.roles.doctor = !settings.roles.doctor; break;
     case "role_maniac": settings.roles.maniac = !settings.roles.maniac; break;
     case "role_bum": settings.roles.bum = !settings.roles.bum; break;
+    case "role_kamikaze": settings.roles.kamikaze = !settings.roles.kamikaze; break;
   }
 }
 
