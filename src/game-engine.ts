@@ -163,6 +163,57 @@ export class GameEngine {
     if (result === "removed") await this.updateLobby(game.id);
   }
 
+  async leaveGame(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    if (!ctx.chat || ctx.chat.type === "private") {
+      await ctx.reply("Отправьте /leave в игровой группе.");
+      return;
+    }
+    const game = await this.db.getActiveGameByChat(String(ctx.chat.id));
+    if (!game) {
+      await ctx.reply("Активной игры или набора нет.");
+      return;
+    }
+    const userId = String(ctx.from.id);
+    if (game.status === "lobby") {
+      if (game.host_id === userId) {
+        await ctx.reply("Создатель не может покинуть набор. Передайте права командой /transfer или отмените игру /stopgame.");
+        return;
+      }
+      const result = await this.db.removePlayerFromLobby(game.id, userId);
+      await ctx.reply(result === "removed" ? "Вы покинули набор." : result === "closed" ? "Набор уже завершён." : "Вы не зарегистрированы в этой игре.");
+      if (result === "removed") await this.updateLobby(game.id);
+      return;
+    }
+
+    const player = await this.db.getPlayer(game.id, userId);
+    if (!player) {
+      await ctx.reply("Вы не участвуете в этой игре.");
+      return;
+    }
+    if (!player.alive) {
+      await ctx.reply("Вы уже выбыли из этой игры.");
+      return;
+    }
+    if (game.host_id === userId) {
+      await ctx.reply("Ведущий не может покинуть игру. Передайте права командой /transfer или остановите игру /stopgame.");
+      return;
+    }
+
+    await this.db.killPlayers(game.id, [userId]);
+    if (game.pending_elimination_id === userId) {
+      await this.db.setPendingElimination(game.id, null);
+      if (game.phase === "last_word" || game.phase === "judgment") {
+        await this.sendTracked(game, `🚪 ${mention(player)} покинул игру.`);
+        await this.startNextNight(game.id, game.day + 1);
+        return;
+      }
+    }
+    await this.db.recordAudit(game.chat_id, game.id, userId, "leave_game", { phase: game.phase });
+    await this.sendTracked(game, `🚪 ${mention(player)} покинул игру.`);
+    await this.finishIfWinner(game);
+  }
+
   async refreshLobby(ctx: Context, gameId: number): Promise<void> {
     await safeAnswerCallback(ctx, "Список обновлён");
     await this.updateLobby(gameId);
@@ -828,6 +879,7 @@ export class GameEngine {
       force_next_phase: "переключил фазу",
       kick_player: "исключил игрока",
       transfer_host: "передал ведущего",
+      leave_game: "покинул игру",
       change_setting: "изменил настройку"
     };
     const lines = entries.map((entry) => {

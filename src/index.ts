@@ -53,6 +53,7 @@ async function main(): Promise<void> {
 
   bot.command(["newgame", "game"], (ctx) => engine.createLobby(ctx));
   bot.command("join", (ctx) => engine.sendJoinButton(ctx));
+  bot.command("leave", (ctx) => engine.leaveGame(ctx));
   bot.command("players", (ctx) => engine.showPlayers(ctx));
   bot.command("stopgame", (ctx) => engine.stopGame(ctx));
   bot.command("pause", (ctx) => engine.pauseGame(ctx));
@@ -126,6 +127,7 @@ async function main(): Promise<void> {
       "🛠 <b>Команды Mafia Noir</b>",
       "/newgame — открыть набор",
       "/join — кнопка присоединения",
+      "/leave — выйти из набора или игры",
       "/begin — начать игру",
       "/players — игроки",
       "/settings — правила группы",
