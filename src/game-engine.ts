@@ -1052,7 +1052,7 @@ export class GameEngine {
     const winner = determineWinner(await this.db.getPlayers(game.id, true));
     if (winner) {
       await this.cleanupPhaseMessages(game);
-      await this.sendMorningSummary(game, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet);
+      await this.sendMorningSummary(game, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, actions);
       await this.finishGame(game, winner);
       return;
     }
@@ -1062,27 +1062,51 @@ export class GameEngine {
     const current = (await this.db.getGame(game.id))!;
     await this.cleanupPhaseMessages(current);
     await this.sendPhaseMedia(current, "day", `🌇 <b>День ${game.day}</b> · город просыпается`);
-    await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet);
+    await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, actions);
     await this.sendTracked(current, [alivePlayersText(await this.db.getPlayers(game.id, true)), "", `💬 Обсуждение: <b>${game.settings.daySeconds} сек.</b>`].join("\n"));
     this.schedulePhase(game.id, endsAt);
   }
 
-  private async sendMorningSummary(game: GameRow, killed: PlayerRow[], afkSet: Set<string>, savedCount: number, mafiaTarget: string | null, mafiaVotes: number, revengeSet: Set<string>): Promise<void> {
-    const lines = ["🌇 <b>Итоги ночи</b>"];
+  private async sendMorningSummary(game: GameRow, killed: PlayerRow[], afkSet: Set<string>, savedCount: number, mafiaTarget: string | null, mafiaVotes: number, revengeSet: Set<string>, players: PlayerRow[], actions: ActionRow[]): Promise<void> {
     const attackedKilled = killed.filter((player) => !afkSet.has(player.user_id) && !revengeSet.has(player.user_id));
-    if (!attackedKilled.length && !revengeSet.size) lines.push("Город проснулся без жертв нападений.");
+    if (!attackedKilled.length && !revengeSet.size) {
+      await this.sendTracked(game, "Город проснулся без жертв нападений.");
+    }
+
     for (const victim of attackedKilled) {
-      lines.push(`Убит(а) ${mention(victim)}${game.settings.revealDeadRoles && victim.role ? ` — ${roleLabel(victim.role)}` : ""}.`);
+      const title = game.settings.revealDeadRoles && victim.role
+        ? `Сегодня был жестоко ${roleLabel(victim.role)} ${mention(victim)}…`
+        : `Сегодня был ${mention(victim)}…`;
+      const guests = this.nightGuests(victim, players, actions);
+      await this.sendTracked(game, guests.length
+        ? `${title}\nГоворят, у него в гостях был ${guests.map((guest) => `${roleLabel(guest.role!)} ${mention(guest)}`).join(" и ")}`
+        : title);
     }
+
     for (const victim of killed.filter((player) => revengeSet.has(player.user_id))) {
-      lines.push(`💣 Камикадзе утянул(а) с собой ${mention(victim)}${game.settings.revealDeadRoles && victim.role ? ` — ${roleLabel(victim.role)}` : ""}.`);
+      await this.sendTracked(game, `💣 Камикадзе утянул(а) с собой ${mention(victim)}${game.settings.revealDeadRoles && victim.role ? ` — ${roleLabel(victim.role)}` : ""}.`);
     }
+
     for (const player of killed.filter((item) => afkSet.has(item.user_id))) {
-      lines.push(`💤 ${mention(player)} выбыл(а) за бездействие${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
+      await this.sendTracked(game, `💤 ${mention(player)} выбыл(а) за бездействие${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
     }
-    if (savedCount) lines.push("👨‍⚕️ Доктор предотвратил нападение.");
-    if (!mafiaTarget && mafiaVotes) lines.push("🔪 Мафия не смогла договориться.");
-    await this.sendTracked(game, lines.join("\n"));
+
+    if (savedCount) await this.sendTracked(game, "👨‍⚕️ Доктор предотвратил нападение.");
+    if (!mafiaTarget && mafiaVotes) await this.sendTracked(game, "🔪 Мафия не смогла договориться.");
+  }
+
+  private nightGuests(victim: PlayerRow, players: PlayerRow[], actions: ActionRow[]): PlayerRow[] {
+    const aliveIds = new Set(players.filter((player) => player.alive === 1).map((player) => player.user_id));
+    const visitingTypes = new Set<ActionType>(["doctor_heal", "commissar_check", "don_check", "bum_visit"]);
+    const guestIds = new Set<string>();
+    for (const action of actions) {
+      if (action.target_id !== victim.user_id) continue;
+      if (action.actor_id === victim.user_id) continue;
+      if (!visitingTypes.has(action.type)) continue;
+      if (!aliveIds.has(action.actor_id)) continue;
+      guestIds.add(action.actor_id);
+    }
+    return players.filter((player) => guestIds.has(player.user_id) && player.role);
   }
 
   private async applyNightAfk(game: GameRow, players: PlayerRow[], actions: ActionRow[]): Promise<string[]> {
