@@ -342,6 +342,40 @@ export class GameEngine {
     }
   }
 
+  async handleCommissionerChoice(ctx: Context, gameId: number, day: number, choice: "check" | "shoot"): Promise<void> {
+    if (!ctx.from || ctx.chat?.type !== "private") {
+      await safeAnswerCallback(ctx, "Ночные действия доступны только в личном чате", true);
+      return;
+    }
+    const game = await this.db.getGame(gameId);
+    if (!game || game.status !== "running" || game.phase !== "night" || game.day !== day) {
+      await safeAnswerCallback(ctx, "Эта кнопка относится к завершённой ночи", true);
+      return;
+    }
+    const allPlayers = await this.db.getPlayers(game.id);
+    const actor = await this.db.getPlayer(game.id, String(ctx.from.id));
+    if (!actor?.alive || effectiveNightRole(actor, allPlayers) !== "commissar") {
+      await safeAnswerCallback(ctx, "Это действие вам недоступно", true);
+      return;
+    }
+    const type: ActionType = choice === "shoot" ? "commissar_shoot" : "commissar_check";
+    if (type === "commissar_shoot" && !game.settings.commissionerCanShoot) {
+      await safeAnswerCallback(ctx, "Стрельба Комиссара отключена", true);
+      return;
+    }
+    const alive = allPlayers.filter((player) => player.alive === 1);
+    const targets = await this.validTargets(type, actor, alive, game);
+    if (!targets.length) {
+      await safeAnswerCallback(ctx, "Нет доступных целей", true);
+      return;
+    }
+    await safeAnswerCallback(ctx);
+    await ctx.reply(ACTION_TITLES[type], {
+      ...privateHtml(),
+      reply_markup: targetKeyboard(game.id, day, type, targets)
+    });
+  }
+
   async handleNomination(ctx: Context, gameId: number, day: number, targetId: string): Promise<void> {
     if (!ctx.from || ctx.chat?.type !== "private") {
       await safeAnswerCallback(ctx, "Выдвижение доступно только в личном чате с ботом", true);
@@ -978,9 +1012,7 @@ export class GameEngine {
   private async sendRoleCard(player: PlayerRow, allPlayers: PlayerRow[], game: GameRow): Promise<void> {
     if (!player.role) throw new Error(`У игрока ${player.user_id} нет роли`);
     const lines = [
-      `🎴 <b>${escapeHtml(this.config.brandName)} · Ваша роль</b>`,
-      "",
-      roleLabel(player.role),
+      `Ты - ${roleRevealTitle(player.role)}!`,
       roleDescription(player.role),
       "",
       `Игра: <b>${escapeHtml(game.chat_title)}</b> · ID ${game.id}`
@@ -1012,6 +1044,10 @@ export class GameEngine {
       const role = effectiveNightRole(actor, allPlayers);
       if (!nightActionsForRole(role, game.settings).length) continue;
       try {
+        if (role === "commissar") {
+          await this.sendCommissionerPrompt(game, actor);
+          continue;
+        }
         for (const type of nightActionsForRole(role, game.settings)) {
           const targets = await this.validTargets(type, actor, alive, game);
           if (!targets.length) continue;
@@ -1028,6 +1064,22 @@ export class GameEngine {
         this.logger.warn(`Не удалось отправить ночное действие игроку ${actor.user_id}`, error);
       }
     }
+  }
+
+  private async sendCommissionerPrompt(game: GameRow, actor: PlayerRow): Promise<void> {
+    const canShoot = game.settings.commissionerCanShoot;
+    const text = canShoot
+      ? "Пришло время действовать!\nТы можешь проверить игрока или убить кого-нибудь наугад..."
+      : "Пришло время действовать!\nТы можешь проверить игрока на связь с мафией...";
+    const keyboard = canShoot
+      ? Markup.inlineKeyboard([
+          [Markup.button.callback("🔍 Проверить", `cc:${game.id}:${game.day}:check`)],
+          [Markup.button.callback("🔫 Убить", `cc:${game.id}:${game.day}:shoot`)]
+        ]).reply_markup
+      : Markup.inlineKeyboard([
+          [Markup.button.callback("🔍 Проверить", `cc:${game.id}:${game.day}:check`)]
+        ]).reply_markup;
+    await this.bot.telegram.sendMessage(actor.user_id, text, { ...privateHtml(), reply_markup: keyboard });
   }
 
   private async validTargets(type: ActionType, actor: PlayerRow, alive: PlayerRow[], game: GameRow): Promise<PlayerRow[]> {
@@ -1740,6 +1792,12 @@ function validSingleActionTarget(actions: ActionRow[], players: PlayerRow[], ali
     const actor = players.find((player) => player.user_id === action.actor_id);
     return action.type === type && aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) && effectiveNightRole(actor!, players) === role;
   })?.target_id ?? null;
+}
+
+function roleRevealTitle(role: Role): string {
+  const info = ROLES[role];
+  const title = role === "commissar" ? "Комиссар Каттани" : info.title;
+  return `${info.emoji} <b>${title}</b>`;
 }
 
 function effectiveNightRole(player: PlayerRow, players: PlayerRow[]): Role {

@@ -163,6 +163,8 @@ async function main(): Promise<void> {
     (ctx) => engine.handleVote(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
   bot.action(/^act:(\d+):(\d+):(mafia_kill|don_check|commissar_check|commissar_shoot|doctor_heal|maniac_kill|bum_visit|lawyer_defend|mistress_visit):(-?\d+)$/,
     (ctx) => engine.handleNightAction(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3] as ActionType, ctx.match[4]!));
+  bot.action(/^cc:(\d+):(\d+):(check|shoot)$/,
+    (ctx) => engine.handleCommissionerChoice(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3] as "check" | "shoot"));
 
   let lastOwnerAlert = 0;
   bot.catch(async (error, ctx) => {
