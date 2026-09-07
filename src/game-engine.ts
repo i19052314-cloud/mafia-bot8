@@ -862,6 +862,10 @@ export class GameEngine {
     return Markup.inlineKeyboard([Markup.button.url("🌙 Перейти к боту", `https://t.me/${this.botUsername}`)]).reply_markup;
   }
 
+  private voteFromGroupKeyboard(): InlineKeyboardMarkup {
+    return Markup.inlineKeyboard([Markup.button.url("Голосовать ↗", `https://t.me/${this.botUsername}`)]).reply_markup;
+  }
+
   private joinUrl(gameId: number): string {
     return `https://t.me/${this.botUsername}?start=join_${gameId}`;
   }
@@ -1151,12 +1155,12 @@ export class GameEngine {
     const updated = (await this.db.getGame(game.id))!;
     await this.cleanupPhaseMessages(updated);
     await this.sendTracked(updated, [
-      "⚖️ <b>Голосование</b>",
-      `Время: <b>${game.settings.voteSeconds} сек.</b>`,
+      "Пришло время определить и наказать виновных.",
+      `Голосование продлится ${game.settings.voteSeconds} секунд`,
+      "",
       `Кандидаты: ${candidates.map((player) => mention(player)).join(", ")}`,
-      "Голосуйте в личных сообщениях с ботом."
-    ].join("\n"), this.openBotKeyboard());
-    await this.sendTracked(updated, `Право голоса имеют <b>${alive.length}</b> живых игроков.`);
+      `Голосуют <b>${alive.length}</b> живых игроков.`
+    ].join("\n"), this.voteFromGroupKeyboard());
     await this.sendVotePrompts(updated, candidates);
     this.schedulePhase(game.id, endsAt);
   }
@@ -1166,8 +1170,8 @@ export class GameEngine {
     for (const voter of alive) {
       try {
         await this.bot.telegram.sendMessage(voter.user_id, [
-          "🔥 <b>Пришло время искать виноватых!</b>",
-          "Кого ты хочешь линчевать?"
+          "🔥 <b>Пришло время определить и наказать виновных.</b>",
+          "Выберите, кого вы хотите линчевать."
         ].join("\n"), {
           ...privateHtml(),
           reply_markup: voteKeyboard(game.id, game.day, candidates, game.settings.allowSkipVote)
