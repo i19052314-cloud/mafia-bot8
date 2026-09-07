@@ -928,8 +928,10 @@ export class GameEngine {
           const targets = await this.validTargets(type, actor, alive, game);
           if (!targets.length) continue;
           const oneTime = type === "don_check" || type === "commissar_check" || type === "commissar_shoot";
+          const intro = nightFlavorIntro(type, actor);
+          const hint = oneTime ? "Действие выполняется один раз." : "Выбор можно изменить до конца ночи.";
           await this.bot.telegram.sendMessage(actor.user_id,
-            `<b>Ночь ${game.day}</b>\n${ACTION_TITLES[type]}\n${oneTime ? "Действие выполняется один раз." : "Выбор можно изменить до конца ночи."}`, {
+            `🌃 <b>Ночь ${game.day}</b>\n\n${intro}\n\n${hint}`, {
               ...privateHtml(),
               reply_markup: targetKeyboard(game.id, game.day, type, targets)
             });
@@ -1482,6 +1484,19 @@ function nightActionsForRole(role: Role, settings: GameSettings): ActionType[] {
     case "bum": return ["bum_visit"];
     case "kamikaze": return [];
     case "citizen": return [];
+  }
+}
+
+function nightFlavorIntro(type: ActionType, actor: PlayerRow): string {
+  const name = playerName(actor);
+  switch (type) {
+    case "mafia_kill": return `🔪 <b>Мафия</b> выходит на охоту за жертвой…`;
+    case "don_check": return `🤵 <b>Дон ${name}</b> уже приступил к поискам Комиссара…`;
+    case "commissar_check": return `🕵️ <b>Комиссар ${name}</b> уже зарядил свой пистолет…`;
+    case "commissar_shoot": return `🔫 <b>Комиссар ${name}</b> уже взял цель на мушку…`;
+    case "doctor_heal": return `👨‍⚕️ <b>Доктор</b> вышел на ночное дежурство…`;
+    case "maniac_kill": return `🪓 <b>Маньяк</b> выходит на охоту…`;
+    case "bum_visit": return `🍾 <b>Бомж</b> отправился в гости…`;
   }
 }
 
