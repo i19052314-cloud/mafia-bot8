@@ -229,7 +229,7 @@ export class GameEngine {
         "Активные роли делают выбор в личных сообщениях.",
         `⏳ На действия: <b>${game.settings.nightSeconds} сек.</b>`,
         "",
-        alivePlayersText(assignedPlayers)
+        alivePlayersText(assignedPlayers, game.settings)
       ].join("\n"), this.openBotKeyboard());
       await this.sendNightPrompts(game.id);
       const endsAt = Date.now() + game.settings.nightSeconds * 1000;
@@ -472,7 +472,7 @@ export class GameEngine {
     }
     const players = await this.db.getPlayers(game.id, game.status === "running");
     await ctx.reply(game.status === "running"
-      ? alivePlayersText(players)
+      ? alivePlayersText(players, game.settings)
       : lobbyText(this.config.brandName, game, players), { parse_mode: "HTML" });
   }
 
@@ -1226,7 +1226,7 @@ export class GameEngine {
     await this.cleanupPhaseMessages(current);
     await this.sendPhaseMedia(current, "day", `🌇 <b>День ${game.day}</b> · город просыпается`);
     await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, performedActions);
-    await this.sendTracked(current, [alivePlayersText(await this.db.getPlayers(game.id, true)), "", `💬 Обсуждение: <b>${game.settings.daySeconds} сек.</b>`].join("\n"));
+    await this.sendTracked(current, [alivePlayersText(await this.db.getPlayers(game.id, true), game.settings), "", "Сейчас самое время обсудить результаты ночи, разобраться в причинах и следствиях..."].join("\n"));
     this.schedulePhase(game.id, endsAt);
   }
 

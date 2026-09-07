@@ -51,13 +51,61 @@ export function lobbyText(brandName: string, game: GameRow, players: PlayerRow[]
   ].join("\n");
 }
 
-export function alivePlayersText(players: PlayerRow[]): string {
-  return [
+const ROLE_LIST_ORDER: Role[] = [
+  "citizen", "mafia", "lucky", "doctor", "commissar", "don",
+  "maniac", "bum", "kamikaze", "sergeant", "lawyer", "suicide", "mistress"
+];
+
+function roleListTitle(role: Role): string {
+  return role === "commissar" ? "Комиссар Каттани" : ROLES[role].title;
+}
+
+export function alivePlayersText(players: PlayerRow[], settings?: GameSettings): string {
+  const list = players.map((player, index) =>
+    `${index + 1}. ${player.username ? escapeHtml(player.username) : escapeHtml(player.first_name)}`
+  ).join("\n");
+  const lines: string[] = [
     "<b>Живые игроки:</b>",
-    ...players.map((player, index) => `${index + 1}. ${mention(player)}${player.afk_strikes ? ` · ⚠️ ${player.afk_strikes}` : ""}`),
-    "",
-    `Всего: <b>${players.length}</b>`
-  ].join("\n");
+    list
+  ];
+
+  if (settings) {
+    const roleCounts = new Map<Role, number>();
+    for (const player of players) {
+      if (player.role) roleCounts.set(player.role, (roleCounts.get(player.role) ?? 0) + 1);
+    }
+    const enabledRoles = ROLE_LIST_ORDER.filter((role) => ({
+      citizen: true,
+      mafia: true,
+      don: settings.roles.don,
+      commissar: settings.roles.commissar,
+      doctor: settings.roles.doctor,
+      maniac: settings.roles.maniac,
+      bum: settings.roles.bum,
+      kamikaze: settings.roles.kamikaze,
+      sergeant: settings.roles.sergeant,
+      lawyer: settings.roles.lawyer,
+      lucky: settings.roles.lucky,
+      suicide: settings.roles.suicide,
+      mistress: settings.roles.mistress
+    } as Record<Role, boolean>)[role]);
+    const parts = enabledRoles.map((role) => {
+      const count = roleCounts.get(role) ?? 0;
+      const base = `${ROLES[role].emoji} ${roleListTitle(role)}`;
+      return count > 1 ? `${base} — ${count}` : base;
+    });
+    lines.push(
+      "",
+      "<b>Кто-то из них:</b>",
+      `${parts.join(", ")}.`,
+      "",
+      `Всего: ${players.length} чел.`
+    );
+  } else {
+    lines.push("", `Всего: <b>${players.length}</b>`);
+  }
+
+  return lines.join("\n");
 }
 
 export function winnerText(winner: Winner): string {
