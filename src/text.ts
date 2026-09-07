@@ -35,16 +35,16 @@ export function roleDescription(role: Role): string {
 export function lobbyText(brandName: string, game: GameRow, players: PlayerRow[]): string {
   const list = players.map((player, index) => `${index + 1}. ${mention(player)}`).join("\n");
   const missing = Math.max(0, game.settings.minPlayers - players.length);
+  const host = players.find((player) => player.user_id === game.host_id) ?? players[0];
   return [
-    `🎭 <b>${escapeHtml(brandName)} · Набор в игру</b>`,
+    `🎭 <b>${escapeHtml(brandName)} · Ведётся набор в игру</b>`,
     "",
-    `<b>Создатель:</b> ${mention(players.find((player) => player.user_id === game.host_id) ?? players[0]!)}`,
-    `<b>Игроки (${players.length}/${game.settings.maxPlayers}):</b>`,
+    host ? `<b>Создатель:</b> ${mention(host)}` : "",
+    "",
+    "<b>Зарегистрировались:</b>",
     list || "Пока никого нет.",
     "",
-    missing > 0 ? `Для старта нужно ещё: <b>${missing}</b>` : "✅ Можно начинать игру!",
-    "",
-    "Нажмите «Присоединиться». Личный чат нужен для тайной выдачи роли."
+    `Итого <b>${players.length}</b> чел.` + (missing > 0 ? ` · нужно ещё <b>${missing}</b>` : " · ✅ можно начинать")
   ].join("\n");
 }
 
