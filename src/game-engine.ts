@@ -16,8 +16,7 @@ import {
   roleDescription,
   roleLabel,
   settingsText,
-  shopText,
-  winnerText
+  shopText
 } from "./text.js";
 import {
   ROLES,
@@ -1339,14 +1338,24 @@ export class GameEngine {
     await this.db.finishGame(game.id, winner);
     await this.cleanupPhaseMessages(game);
     const players = await this.db.getPlayers(game.id);
-    await this.bot.telegram.sendMessage(game.chat_id, [
-      winnerText(winner),
+    const { winners, others } = groupEndGamePlayers(players, winner);
+    const winnerLine = winner === "town" ? "Мирные жители" : winner === "mafia" ? "Мафия" : "Маньяк";
+
+    const lines: string[] = [
+      "<b>Игра окончена!</b>",
+      `Победили: ${winnerLine}`,
       "",
-      "Рейтинг: /top · Новая игра: /newgame"
-    ].join("\n"), { parse_mode: "HTML" });
-    const roleLines = players.map((player) => `${roleLabel(player.role!)} — ${mention(player)}`);
-    for (const part of chunkLines(roleLines, 3400)) {
-      await this.bot.telegram.sendMessage(game.chat_id, ["<b>Роли игроков:</b>", ...part].join("\n"), { parse_mode: "HTML" });
+      "<b>Победители:</b>",
+      ...(winners.length ? winners.map((player) => `• ${mention(player)} — ${roleLabel(player.role!)}`) : ["Никого нет."]),
+      "",
+      "<b>Остальные участники:</b>",
+      ...(others.length ? others.map((player) => `• ${mention(player)} — ${roleLabel(player.role!)}`) : ["Никого нет."]),
+      "",
+      `Игра длилась: ${durationText(Date.now() - (game.started_at ?? game.created_at))}`
+    ];
+
+    for (const part of chunkLines(lines, 3400)) {
+      await this.bot.telegram.sendMessage(game.chat_id, part.join("\n"), { parse_mode: "HTML" });
     }
     await this.sendEndGameProfiles(players);
   }
@@ -1534,6 +1543,29 @@ function chunkLines(lines: string[], maximumLength: number): string[][] {
 function plainPlayerName(player: Pick<PlayerRow, "username" | "first_name">): string {
   const value = player.username ? `@${player.username}` : player.first_name;
   return value.length > 28 ? `${value.slice(0, 27)}…` : value;
+}
+
+function groupEndGamePlayers(players: PlayerRow[], winner: Winner): { winners: PlayerRow[]; others: PlayerRow[] } {
+  const winners: PlayerRow[] = [];
+  const others: PlayerRow[] = [];
+  for (const player of players) {
+    const role = player.role;
+    const side = role ? ROLES[role].side : null;
+    const onWinningSide = player.alive === 1 && (
+      (winner === "town" && side === "town") ||
+      (winner === "mafia" && (role === "mafia" || role === "don")) ||
+      (winner === "maniac" && role === "maniac")
+    );
+    (onWinningSide ? winners : others).push(player);
+  }
+  return { winners, others };
+}
+
+function durationText(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes} мин. ${seconds} сек.`;
 }
 
 function isPlayer(player: PlayerRow | undefined): player is PlayerRow {

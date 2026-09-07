@@ -66,6 +66,7 @@ export interface GameRow {
   winner: Winner | null;
   settings: GameSettings;
   created_at: number;
+  started_at: number | null;
   updated_at: number;
 }
 

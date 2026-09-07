@@ -67,8 +67,11 @@ export class GameDatabase {
         winner TEXT CHECK (winner IS NULL OR winner IN ('town','mafia','maniac')),
         settings JSONB NOT NULL,
         created_at DOUBLE PRECISION NOT NULL,
+        started_at DOUBLE PRECISION,
         updated_at DOUBLE PRECISION NOT NULL
       );
+
+      ALTER TABLE games ADD COLUMN IF NOT EXISTS started_at DOUBLE PRECISION;
 
       CREATE UNIQUE INDEX IF NOT EXISTS games_one_active_per_chat
       ON games(chat_id) WHERE status IN ('lobby','running');
@@ -279,10 +282,11 @@ export class GameDatabase {
   }
 
   async startGame(gameId: number, firstNightEndsAt: number): Promise<boolean> {
+    const now = Date.now();
     const result = await this.pool.query(`
       UPDATE games SET status = 'running', phase = 'night', day = 1,
-        phase_ends_at = $1, updated_at = $2 WHERE id = $3 AND status = 'lobby'
-    `, [firstNightEndsAt, Date.now(), gameId]);
+        phase_ends_at = $1, started_at = $2, updated_at = $2 WHERE id = $3 AND status = 'lobby'
+    `, [firstNightEndsAt, now, gameId]);
     return (result.rowCount ?? 0) > 0;
   }
 
@@ -609,6 +613,7 @@ function normalizeGame(row: Record<string, unknown>): GameRow {
     paused_remaining_ms: row.paused_remaining_ms == null ? null : Number(row.paused_remaining_ms),
     lobby_message_id: row.lobby_message_id == null ? null : Number(row.lobby_message_id),
     created_at: Number(row.created_at),
+    started_at: row.started_at == null ? null : Number(row.started_at),
     updated_at: Number(row.updated_at),
     settings: normalizeSettings(row.settings, undefined)
   } as GameRow;
