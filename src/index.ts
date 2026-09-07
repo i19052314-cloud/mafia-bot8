@@ -70,6 +70,7 @@ async function main(): Promise<void> {
   bot.command("mafia", (ctx) => engine.relayMafiaMessage(ctx, commandArgument(ctx)));
   bot.command("deleteme", (ctx) => engine.deleteMyData(ctx));
   bot.command("report", (ctx) => engine.sendReport(ctx, commandArgument(ctx)));
+  bot.command("give", (ctx) => engine.giveCurrency(ctx, commandArgument(ctx)));
 
   bot.command("begin", async (ctx) => {
     if (!ctx.chat || ctx.chat.type === "private") {

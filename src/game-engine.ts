@@ -612,6 +612,51 @@ export class GameEngine {
     );
   }
 
+  async giveCurrency(ctx: Context, rawText: string): Promise<void> {
+    if (!ctx.from) return;
+    if (!this.config.ownerTelegramId || String(ctx.from.id) !== this.config.ownerTelegramId) {
+      await ctx.reply("Эта команда доступна только владельцу бота.");
+      return;
+    }
+
+    const replied = repliedUser(ctx);
+    const tokens = rawText.trim().split(/\s+/).filter(Boolean);
+
+    let targetUser = replied;
+    let rest = tokens;
+    if (!targetUser) {
+      const ref = tokens[0];
+      if (!ref) {
+        await ctx.reply("Использование: /give @username money 500 (или ответьте на сообщение игрока)");
+        return;
+      }
+      const found = await this.db.findUserByRef(ref);
+      if (!found) {
+        await ctx.reply(`Игрок «${escapeHtml(ref)}» не найден. Убедитесь, что это @username или числовой ID.`, { parse_mode: "HTML" });
+        return;
+      }
+      targetUser = { id: Number(found.id), username: found.username, first_name: found.firstName };
+      rest = tokens.slice(1);
+    }
+
+    const currencyToken = rest[0]?.toLowerCase();
+    const amount = Number(rest[1]);
+    if ((currencyToken !== "money" && currencyToken !== "gems") || !Number.isInteger(amount) || amount <= 0 || amount > 10_000_000) {
+      await ctx.reply("Использование: /give @username money 500 (или gems). Сумма — целое число от 1 до 10 000 000.");
+      return;
+    }
+    const currency: Currency = currencyToken === "gems" ? "gems" : "money";
+
+    const profile = await this.db.grantCurrency(userData(targetUser), currency, amount);
+    const label = currency === "money" ? "💵 монет" : "💎 камней";
+    const targetName = targetUser.username ? `@${targetUser.username}` : targetUser.first_name;
+    await ctx.reply(
+      `✅ Начислено <b>${amount}</b> ${label} игроку <b>${escapeHtml(targetName)}</b>.\n` +
+      `Текущий баланс: 💵 <b>${profile.money}</b> · 💎 <b>${profile.gems}</b>`,
+      { parse_mode: "HTML" }
+    );
+  }
+
   private async replyOrEdit(ctx: Context, text: string, keyboard: InlineKeyboardMarkup): Promise<void> {
     const message = ctx.callbackQuery?.message;
     if (message && "message_id" in message) {
@@ -1658,10 +1703,12 @@ function privateHtml(): { parse_mode: "HTML"; protect_content: true } {
   return { parse_mode: "HTML", protect_content: true };
 }
 
-function repliedUser(ctx: Context): { id: number } | undefined {
+function repliedUser(ctx: Context): { id: number; username?: string; first_name: string } | undefined {
   const message = ctx.message;
   if (!message || !("reply_to_message" in message)) return undefined;
-  return message.reply_to_message?.from;
+  const from = message.reply_to_message?.from;
+  if (!from) return undefined;
+  return { id: from.id, username: from.username ?? undefined, first_name: from.first_name };
 }
 
 async function safeAnswerCallback(ctx: Context, text?: string, showAlert = false): Promise<void> {

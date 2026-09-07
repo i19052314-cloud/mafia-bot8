@@ -467,6 +467,61 @@ export class GameDatabase {
     return normalizeProfile(result.rows[0]);
   }
 
+  async findUserByRef(ref: string): Promise<TelegramUserData | undefined> {
+    const clean = ref.trim().replace(/^@/, "");
+    const idMatch = /^\d+$/.test(clean);
+    const byId = idMatch
+      ? { id: clean }
+      : undefined;
+    const filter = byId ? { id: byId.id } : { username: clean };
+
+    const inEconomy = await this.pool.query(
+      "SELECT user_id, username, first_name FROM user_economy WHERE user_id = $1 OR lower(username) = lower($2) LIMIT 1",
+      [byId ? byId.id : "", clean]
+    );
+    if (inEconomy.rows[0]) {
+      const row = inEconomy.rows[0];
+      return { id: String(row.user_id), username: row.username ?? undefined, firstName: row.first_name };
+    }
+
+    const inStats = await this.pool.query(
+      "SELECT user_id, username, first_name FROM user_stats WHERE user_id = $1 OR lower(username) = lower($2) LIMIT 1",
+      [byId ? byId.id : "", clean]
+    );
+    if (inStats.rows[0]) {
+      const row = inStats.rows[0];
+      return { id: String(row.user_id), username: row.username ?? undefined, firstName: row.first_name };
+    }
+
+    const inPlayers = await this.pool.query(
+      "SELECT user_id, username, first_name FROM game_players WHERE user_id = $1 OR lower(username) = lower($2) LIMIT 1",
+      [byId ? byId.id : "", clean]
+    );
+    if (inPlayers.rows[0]) {
+      const row = inPlayers.rows[0];
+      return { id: String(row.user_id), username: row.username ?? undefined, firstName: row.first_name };
+    }
+    return undefined;
+  }
+
+  async grantCurrency(user: TelegramUserData, currency: Currency, amount: number): Promise<UserProfile> {
+    const result = await this.pool.query(`
+      INSERT INTO user_economy (user_id, username, first_name, money, gems, updated_at)
+      VALUES ($1, $2, $3,
+        1000 + CASE WHEN $4::text = 'money' THEN $5 ELSE 0 END,
+        CASE WHEN $4::text = 'gems' THEN $5 ELSE 0 END,
+        $6)
+      ON CONFLICT(user_id) DO UPDATE SET
+        username = EXCLUDED.username,
+        first_name = EXCLUDED.first_name,
+        money = user_economy.money + CASE WHEN $4::text = 'money' THEN $5 ELSE 0 END,
+        gems = user_economy.gems + CASE WHEN $4::text = 'gems' THEN $5 ELSE 0 END,
+        updated_at = $6
+      RETURNING user_id, money, gems, protection, documents, active_role
+    `, [user.id, user.username ?? null, user.firstName, currency, amount, Date.now()]);
+    return normalizeProfile(result.rows[0]);
+  }
+
   async buyShopItem(user: TelegramUserData, item: ShopItem, price: number, currency: Currency): Promise<{ ok: boolean; profile: UserProfile }> {
     const balanceColumn = currency === "gems" ? "gems" : "money";
     return this.transaction(async (client) => {
