@@ -30,12 +30,12 @@ async function main(): Promise<void> {
     }
     await ctx.reply([
       `🎭 <b>${escapeHtml(config.brandName)}</b>`,
-      "Я провожу игру в Мафию: раздаю тайные роли, принимаю ночные действия и веду голосование.",
+      "Я провожу игру в Мафию: раздаю тайные роли, принимаю ночные действия, веду кандидатуры и голосование.",
       "",
       "1. Добавьте меня в группу.",
       "2. Отправьте /newgame.",
       "3. Игроки нажимают «Присоединиться».",
-      "4. Ведущий отправляет /begin, чтобы начать игру.",
+      "4. Ведущий нажимает «Начать игру».",
       "",
       "Справка: /help · Конфиденциальность: /privacy"
     ].join("\n"), { parse_mode: "HTML" });
@@ -53,6 +53,7 @@ async function main(): Promise<void> {
 
   bot.command(["newgame", "game"], (ctx) => engine.createLobby(ctx));
   bot.command("join", (ctx) => engine.sendJoinButton(ctx));
+  bot.command("leave", (ctx) => engine.leaveGame(ctx));
   bot.command("players", (ctx) => engine.showPlayers(ctx));
   bot.command("stopgame", (ctx) => engine.stopGame(ctx));
   bot.command("pause", (ctx) => engine.pauseGame(ctx));
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
   bot.command("mafia", (ctx) => engine.relayMafiaMessage(ctx, commandArgument(ctx)));
   bot.command("deleteme", (ctx) => engine.deleteMyData(ctx));
   bot.command("report", (ctx) => engine.sendReport(ctx, commandArgument(ctx)));
+  bot.command("give", (ctx) => engine.giveCurrency(ctx, commandArgument(ctx)));
 
   bot.command("begin", async (ctx) => {
     if (!ctx.chat || ctx.chat.type === "private") {
@@ -88,7 +90,7 @@ async function main(): Promise<void> {
     await ctx.reply([
       "📖 <b>Правила Mafia Noir</b>",
       "",
-      "Ночью активные роли выбирают цели в личном чате. Днём город обсуждает события и голосует.",
+      "Ночью активные роли выбирают цели в личном чате. Днём город обсуждает события, выдвигает кандидатов и голосует.",
       "",
       "🔪 <b>Мафия</b> и 🤵 <b>Дон</b> выбирают общую жертву. При ничьей выстрела нет.",
       "🤵 <b>Дон</b> ищет Комиссара.",
@@ -96,6 +98,11 @@ async function main(): Promise<void> {
       "👨‍⚕️ <b>Доктор</b> спасает от всех атак и не лечит одну цель две ночи подряд.",
       "🪓 <b>Маньяк</b> действует один и стремится остаться последним.",
       "🧔 <b>Бомж</b> видит гостей выбранного игрока.",
+      "🎖️ <b>Сержант</b> — напарник Комиссара, наследует его роль после гибели.",
+      "🎩 <b>Адвокат</b> укрывает подзащитного от проверки.",
+      "🍀 <b>Счастливчик</b> переживает первое ночное нападение.",
+      "💀 <b>Самоубийца</b> побеждает, если город казнит его.",
+      "💋 <b>Любовница</b> блокирует ночное действие и голос цели.",
       "👨 <b>Мирные</b> ищут преступников голосованием.",
       "",
       "Пропуски действий учитывает AFK-система. Точные правила группы показаны в /settings."
@@ -120,6 +127,7 @@ async function main(): Promise<void> {
       "🛠 <b>Команды Mafia Noir</b>",
       "/newgame — открыть набор",
       "/join — кнопка присоединения",
+      "/leave — выйти из набора или игры",
       "/begin — начать игру",
       "/players — игроки",
       "/settings — правила группы",
@@ -146,11 +154,21 @@ async function main(): Promise<void> {
   bot.action(/^refresh:(\d+)$/, (ctx) => engine.refreshLobby(ctx, Number(ctx.match[1])));
   bot.action(/^begin:(\d+)$/, (ctx) => engine.beginGame(ctx, Number(ctx.match[1])));
   bot.action(/^cfg:([a-z_]+)$/, (ctx) => engine.handleSetting(ctx, ctx.match[1]!));
+  bot.action(/^profile:shop$/, (ctx) => engine.openShop(ctx));
+  bot.action(/^profile:back$/, (ctx) => engine.backToProfile(ctx));
+  bot.action(/^profile:buy_money$/, (ctx) => engine.handleBuyCurrency(ctx, "money"));
+  bot.action(/^profile:buy_gems$/, (ctx) => engine.handleBuyCurrency(ctx, "gems"));
   bot.action(/^shop:(documents|protection|active_role)$/, (ctx) => engine.handleShopPurchase(ctx, ctx.match[1] as ShopItem));
+  bot.action(/^nom:(\d+):(\d+):(-?\d+)$/,
+    (ctx) => engine.handleNomination(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
   bot.action(/^vote:(\d+):(\d+):(skip|-?\d+)$/,
     (ctx) => engine.handleVote(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
-  bot.action(/^act:(\d+):(\d+):(mafia_kill|don_check|commissar_check|commissar_shoot|doctor_heal|maniac_kill|bum_visit):(-?\d+)$/,
+  bot.action(/^judge:(\d+):(\d+):(yes|no)$/,
+    (ctx) => engine.handleJudgmentVote(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3] as "yes" | "no"));
+  bot.action(/^act:(\d+):(\d+):(mafia_kill|don_check|commissar_check|commissar_shoot|doctor_heal|maniac_kill|bum_visit|lawyer_defend|mistress_visit):(-?\d+)$/,
     (ctx) => engine.handleNightAction(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3] as ActionType, ctx.match[4]!));
+  bot.action(/^cc:(\d+):(\d+):(check|shoot)$/,
+    (ctx) => engine.handleCommissionerChoice(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3] as "check" | "shoot"));
 
   let lastOwnerAlert = 0;
   bot.catch(async (error, ctx) => {
@@ -167,7 +185,7 @@ async function main(): Promise<void> {
     }
   });
 
-  await bot.telegram.setMyDescription("Mafia Noir проводит полноценную игру в группах: тайные роли, ночные действия, голосование, AFK-контроль и статистика.", "ru");
+  await bot.telegram.setMyDescription("Mafia Noir проводит полноценную игру в группах: тайные роли, ночные действия, кандидатуры, голосование, AFK-контроль и статистика.", "ru");
   await bot.telegram.setMyShortDescription("Кинематографичная Мафия для групповых чатов.", "ru");
   await bot.telegram.setMyCommands([
     { command: "newgame", description: "Открыть набор" },

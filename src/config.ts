@@ -25,21 +25,31 @@ export function defaultGameSettings(): GameSettings {
     maxPlayers: integer("MAX_PLAYERS", 30, minPlayers, 50),
     nightSeconds: integer("NIGHT_SECONDS", 45, 10, 3600),
     daySeconds: integer("DAY_SECONDS", 60, 10, 3600),
+    nominationSeconds: integer("NOMINATION_SECONDS", 30, 10, 600),
     voteSeconds: integer("VOTE_SECONDS", 30, 10, 600),
     lastWordSeconds: integer("LAST_WORD_SECONDS", 15, 0, 300),
+    judgeSeconds: integer("JUDGE_SECONDS", 30, 10, 600),
     revealDeadRoles: boolean("REVEAL_DEAD_ROLES", true),
     doctorSelfHeal: boolean("DOCTOR_SELF_HEAL", true),
     commissionerCanShoot: boolean("COMMISSIONER_CAN_SHOOT", false),
     allowSelfVote: boolean("ALLOW_SELF_VOTE", false),
     allowSkipVote: boolean("ALLOW_SKIP_VOTE", true),
+    nominationsEnabled: boolean("NOMINATIONS_ENABLED", true),
     afkLimit: integer("AFK_LIMIT", 2, 0, 10),
     autoDeleteMessages: boolean("AUTO_DELETE_MESSAGES", false),
+    friendlyFire: boolean("FRIENDLY_FIRE", false),
     roles: {
       don: boolean("ROLE_DON", true),
       commissar: boolean("ROLE_COMMISSAR", true),
       doctor: boolean("ROLE_DOCTOR", true),
       maniac: boolean("ROLE_MANIAC", true),
-      bum: boolean("ROLE_BUM", true)
+      bum: boolean("ROLE_BUM", true),
+      kamikaze: boolean("ROLE_KAMIKAZE", true),
+      sergeant: boolean("ROLE_SERGEANT", true),
+      lawyer: boolean("ROLE_LAWYER", true),
+      lucky: boolean("ROLE_LUCKY", true),
+      suicide: boolean("ROLE_SUICIDE", true),
+      mistress: boolean("ROLE_MISTRESS", true)
     }
   };
 }
