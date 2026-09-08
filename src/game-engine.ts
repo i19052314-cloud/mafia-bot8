@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { Markup, type Context, type Telegraf } from "telegraf";
 import type { InlineKeyboardMarkup } from "telegraf/types";
 import type { GameDatabase, TelegramUserData } from "./database.js";
@@ -6,16 +7,17 @@ import type { PhaseMedia } from "./media.js";
 import { assignRoles, determineWinner, selectPluralityTarget } from "./rules.js";
 import {
   alivePlayersText,
+  currencyLabel,
   escapeHtml,
   lobbyText,
   mention,
   playerName,
+  priceLabel,
   profileText,
   roleDescription,
   roleLabel,
   settingsText,
-  shopText,
-  winnerText
+  shopText
 } from "./text.js";
 import {
   ROLES,
@@ -24,6 +26,7 @@ import {
   type ActionType,
   type ActivePhase,
   type AppConfig,
+  type Currency,
   type GameRow,
   type GameSettings,
   type PlayerRow,
@@ -39,7 +42,9 @@ const ACTION_ROLE: Record<ActionType, Role[]> = {
   commissar_shoot: ["commissar"],
   doctor_heal: ["doctor"],
   maniac_kill: ["maniac"],
-  bum_visit: ["bum"]
+  bum_visit: ["bum"],
+  lawyer_defend: ["lawyer"],
+  mistress_visit: ["mistress"]
 };
 
 const ACTION_TITLES: Record<ActionType, string> = {
@@ -49,7 +54,9 @@ const ACTION_TITLES: Record<ActionType, string> = {
   commissar_shoot: "🔫 В кого выстрелить? Проверка этой ночью станет недоступна.",
   doctor_heal: "💉 Кого лечить?",
   maniac_kill: "🪓 Кого устранить?",
-  bum_visit: "🍾 К кому пойти в гости?"
+  bum_visit: "🍾 К кому пойти в гости?",
+  lawyer_defend: "🎩 Кого взять под защиту этой ночью?",
+  mistress_visit: "💋 Кого навестить и заблокировать?"
 };
 
 export class GameEngine {
@@ -57,6 +64,11 @@ export class GameEngine {
   private readonly warningTimers = new Map<number, NodeJS.Timeout>();
   private readonly promptTimers = new Map<number, NodeJS.Timeout>();
   private readonly startingGames = new Set<number>();
+  private readonly voteMessages = new Map<string, number>();
+  private readonly voteCandidates = new Map<number, PlayerRow[]>();
+  private readonly judgeVotes = new Map<number, Map<string, "yes" | "no">>();
+  private readonly judgeMessageId = new Map<number, number>();
+  private readonly nightFlavorPosted = new Map<number, Set<string>>();
 
   constructor(
     private readonly bot: Telegraf<Context>,
@@ -87,11 +99,6 @@ export class GameEngine {
         reply_markup: this.lobbyKeyboard(game.id)
       });
       await this.db.setLobbyMessage(game.id, message.message_id);
-      try {
-        await this.bot.telegram.pinChatMessage(chatId, message.message_id, { disable_notification: true });
-      } catch (error) {
-        this.logger.warn("Не удалось закрепить сообщение набора", error);
-      }
       await this.db.recordAudit(chatId, game.id, String(ctx.from.id), "create_game");
     } catch (error) {
       if (isUniqueViolation(error)) await ctx.reply("В этой группе уже открыт набор.");
@@ -110,7 +117,7 @@ export class GameEngine {
       return;
     }
     await ctx.reply("Откройте бота, чтобы получать тайную роль и ночные действия:", {
-      reply_markup: Markup.inlineKeyboard([Markup.button.url("🤵🏻 Присоединиться", this.joinUrl(game.id))]).reply_markup
+      reply_markup: Markup.inlineKeyboard([Markup.button.url("🎭 Присоединиться", this.joinUrl(game.id))]).reply_markup
     });
   }
 
@@ -155,6 +162,57 @@ export class GameEngine {
     const result = await this.db.removePlayerFromLobby(game.id, userId);
     await ctx.reply(result === "removed" ? "Вы покинули набор." : result === "closed" ? "Набор уже завершён." : "Вы не зарегистрированы в этой игре.");
     if (result === "removed") await this.updateLobby(game.id);
+  }
+
+  async leaveGame(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    if (!ctx.chat || ctx.chat.type === "private") {
+      await ctx.reply("Отправьте /leave в игровой группе.");
+      return;
+    }
+    const game = await this.db.getActiveGameByChat(String(ctx.chat.id));
+    if (!game) {
+      await ctx.reply("Активной игры или набора нет.");
+      return;
+    }
+    const userId = String(ctx.from.id);
+    if (game.status === "lobby") {
+      if (game.host_id === userId) {
+        await ctx.reply("Создатель не может покинуть набор. Передайте права командой /transfer или отмените игру /stopgame.");
+        return;
+      }
+      const result = await this.db.removePlayerFromLobby(game.id, userId);
+      await ctx.reply(result === "removed" ? "Вы покинули набор." : result === "closed" ? "Набор уже завершён." : "Вы не зарегистрированы в этой игре.");
+      if (result === "removed") await this.updateLobby(game.id);
+      return;
+    }
+
+    const player = await this.db.getPlayer(game.id, userId);
+    if (!player) {
+      await ctx.reply("Вы не участвуете в этой игре.");
+      return;
+    }
+    if (!player.alive) {
+      await ctx.reply("Вы уже выбыли из этой игры.");
+      return;
+    }
+    if (game.host_id === userId) {
+      await ctx.reply("Ведущий не может покинуть игру. Передайте права командой /transfer или остановите игру /stopgame.");
+      return;
+    }
+
+    await this.db.killPlayers(game.id, [userId]);
+    if (game.pending_elimination_id === userId) {
+      await this.db.setPendingElimination(game.id, null);
+      if (game.phase === "last_word" || game.phase === "judgment") {
+        await this.sendTracked(game, `🚪 ${mention(player)} покинул игру.`);
+        await this.startNextNight(game.id, game.day + 1);
+        return;
+      }
+    }
+    await this.db.recordAudit(game.chat_id, game.id, userId, "leave_game", { phase: game.phase });
+    await this.sendTracked(game, `🚪 ${mention(player)} покинул игру.`);
+    await this.finishIfWinner(game);
   }
 
   async refreshLobby(ctx: Context, gameId: number): Promise<void> {
@@ -220,12 +278,16 @@ export class GameEngine {
 
       const running = (await this.db.getGame(game.id))!;
       await this.cleanupPhaseMessages(running);
-      await this.sendPhaseMedia(running, "night", `🌃 <b>Ночь 1</b> · город засыпает`);
       await this.sendTracked(running, [
-        "Активные роли делают выбор в личных сообщениях.",
-        `⏳ На действия: <b>${game.settings.nightSeconds} сек.</b>`,
+        "<b>Игра начинается!</b>",
         "",
-        alivePlayersText(assignedPlayers)
+        "В течение нескольких секунд бот пришлёт вам личное сообщение с ролью и её описанием."
+      ].join("\n"));
+      await this.sendPhaseMedia(running, "night", `🌃 <b>Наступает ночь</b>\nНа улицы города выходят лишь самые отважные и бесстрашные. Утром попробуем сосчитать их головы...`);
+      await this.sendTracked(running, [
+        alivePlayersText(assignedPlayers, undefined, false),
+        "",
+        `Спать осталось <b>${game.settings.nightSeconds} сек.</b>`
       ].join("\n"), this.openBotKeyboard());
       await this.sendNightPrompts(game.id);
       const endsAt = Date.now() + game.settings.nightSeconds * 1000;
@@ -251,9 +313,11 @@ export class GameEngine {
       return;
     }
 
+    const allPlayers = await this.db.getPlayers(game.id);
     const actor = await this.db.getPlayer(game.id, String(ctx.from.id));
     const target = await this.db.getPlayer(game.id, targetId);
-    if (!actor?.alive || !actor.role || !ACTION_ROLE[type].includes(actor.role)) {
+    const actingRole = actor ? effectiveNightRole(actor, allPlayers) : null;
+    if (!actor?.alive || !actor.role || !actingRole || !ACTION_ROLE[type].includes(actingRole)) {
       await safeAnswerCallback(ctx, "Это действие вам недоступно", true);
       return;
     }
@@ -269,8 +333,16 @@ export class GameEngine {
       await safeAnswerCallback(ctx, "Самолечение отключено", true);
       return;
     }
-    if (type === "mafia_kill" && (target.role === "mafia" || target.role === "don")) {
-      await safeAnswerCallback(ctx, "Нельзя атаковать участника мафии", true);
+    if (type === "mafia_kill" && !game.settings.friendlyFire && isMafiaTeam(target.role)) {
+      await safeAnswerCallback(ctx, "Вы не можете атаковать членов своего мафиозного клана. Выберите другую цель.", true);
+      return;
+    }
+    if (type === "commissar_shoot" && !game.settings.friendlyFire && target.role === "sergeant") {
+      await safeAnswerCallback(ctx, "Огонь по своим отключен. Вы не можете стрелять в напарника.", true);
+      return;
+    }
+    if (type === "mistress_visit" && actor.user_id === target.user_id) {
+      await safeAnswerCallback(ctx, "Нельзя навестить себя", true);
       return;
     }
     if (type === "doctor_heal") {
@@ -298,16 +370,30 @@ export class GameEngine {
       await this.db.recordAction(game.id, game.day, actor.user_id, type, target.user_id);
     }
 
+    await this.postNightFlavor(game, type);
     await safeAnswerCallback(ctx, `Вы выбрали: ${plainPlayerName(target)}`);
     if (type === "don_check") {
       await ctx.reply(target.role === "commissar"
-        ? `🎯 ${playerName(target)} — это Комиссар.`
-        : `❌ ${playerName(target)} — не Комиссар.`, privateHtml());
+        ? `🎯 ${playerName(target)} — это Комиссар Каттани.`
+        : `❌ ${playerName(target)} — не Комиссар Каттани.`, privateHtml());
     } else if (type === "commissar_check") {
-      const mafia = target.role === "mafia" || target.role === "don";
+      const defendedByLawyer = await this.lawyerDefended(game.id, game.day, target.user_id);
+      const mafia = !defendedByLawyer && isMafiaTeam(target.role);
       await ctx.reply(mafia
         ? `🚨 ${playerName(target)} связан(а) с мафией.`
         : `✅ ${playerName(target)} не связан(а) с мафией.`, privateHtml());
+      const sergeant = allPlayers.find((player) => {
+        const role = player.role === "sergeant" && player.alive === 1 && player.user_id !== actor.user_id ? "sergeant" : null;
+        return role === "sergeant";
+      });
+      if (sergeant) {
+        await this.bot.telegram.sendMessage(sergeant.user_id, [
+          `🎖️ Копия отчёта ${playerName(actor)}:`,
+          mafia
+            ? `🚨 ${playerName(target)} связан(а) с мафией.`
+            : `✅ ${playerName(target)} не связан(а) с мафией.`
+        ].join("\n"), privateHtml());
+      }
     } else if (type === "commissar_shoot") {
       await ctx.reply(`🔫 Выстрел назначен: ${playerName(target)}. Изменить его нельзя.`, privateHtml());
     } else {
@@ -315,36 +401,38 @@ export class GameEngine {
     }
   }
 
-  async handleNomination(ctx: Context, gameId: number, day: number, targetId: string): Promise<void> {
+  async handleCommissionerChoice(ctx: Context, gameId: number, day: number, choice: "check" | "shoot"): Promise<void> {
     if (!ctx.from || ctx.chat?.type !== "private") {
-      await safeAnswerCallback(ctx, "Выдвижение доступно только в личном чате с ботом", true);
+      await safeAnswerCallback(ctx, "Ночные действия доступны только в личном чате", true);
       return;
     }
     const game = await this.db.getGame(gameId);
-    if (!game || game.phase !== "nomination" || game.day !== day || game.status !== "running") {
-      await safeAnswerCallback(ctx, "Выдвижение уже завершено", true);
+    if (!game || game.status !== "running" || game.phase !== "night" || game.day !== day) {
+      await safeAnswerCallback(ctx, "Эта кнопка относится к завершённой ночи", true);
       return;
     }
-    const nominator = await this.db.getPlayer(game.id, String(ctx.from.id));
-    const target = await this.db.getPlayer(game.id, targetId);
-    if (!nominator?.alive || !target?.alive) {
-      await safeAnswerCallback(ctx, "Действие доступно только живым игрокам", true);
+    const allPlayers = await this.db.getPlayers(game.id);
+    const actor = await this.db.getPlayer(game.id, String(ctx.from.id));
+    if (!actor?.alive || effectiveNightRole(actor, allPlayers) !== "commissar") {
+      await safeAnswerCallback(ctx, "Это действие вам недоступно", true);
       return;
     }
-    if (nominator.user_id === target.user_id) {
-      await safeAnswerCallback(ctx, "Нельзя выдвинуть себя", true);
+    const type: ActionType = choice === "shoot" ? "commissar_shoot" : "commissar_check";
+    if (type === "commissar_shoot" && !game.settings.commissionerCanShoot) {
+      await safeAnswerCallback(ctx, "Стрельба Комиссара отключена", true);
       return;
     }
-    const previous = (await this.db.getNominations(game.id, game.day)).find((item) => item.nominator_id === nominator.user_id);
-    if (previous?.target_id === target.user_id) {
-      await safeAnswerCallback(ctx, "Вы уже выдвинули этого игрока");
+    const alive = allPlayers.filter((player) => player.alive === 1);
+    const targets = await this.validTargets(type, actor, alive, game);
+    if (!targets.length) {
+      await safeAnswerCallback(ctx, "Нет доступных целей", true);
       return;
     }
-    await this.db.recordNomination(game.id, game.day, nominator.user_id, target.user_id);
-    await safeAnswerCallback(ctx, "Кандидатура принята");
-    await this.sendTracked(game, previous
-      ? `${mention(nominator)} изменил(а) кандидатуру: ${mention(target)}`
-      : `${mention(nominator)} выдвинул(а) ${mention(target)}`);
+    await safeAnswerCallback(ctx);
+    await ctx.reply(ACTION_TITLES[type], {
+      ...privateHtml(),
+      reply_markup: targetKeyboard(game.id, day, type, targets)
+    });
   }
 
   async handleVote(ctx: Context, gameId: number, voteDay: number, targetId: string): Promise<void> {
@@ -360,6 +448,11 @@ export class GameEngine {
     const voter = await this.db.getPlayer(game.id, String(ctx.from.id));
     if (!voter?.alive) {
       await safeAnswerCallback(ctx, "Голосовать могут только живые игроки", true);
+      return;
+    }
+    const blocked = nightBlockedUsers(await this.db.getActions(game.id, game.day), await this.db.getPlayers(game.id));
+    if (blocked.has(voter.user_id)) {
+      await safeAnswerCallback(ctx, "Вы заблокированы Любовницей и не можете голосовать.", true);
       return;
     }
     let target: PlayerRow | undefined;
@@ -389,8 +482,31 @@ export class GameEngine {
     await safeAnswerCallback(ctx, "Голос принят");
     const targetText = targetId === "skip" ? "пропуск голосования" : mention(target!);
     await this.sendTracked(game, oldVote
-      ? `${mention(voter)} изменил(а) голос: ${targetText}`
-      : `${mention(voter)} проголосовал(а) за ${targetText}`);
+      ? `${mention(voter)} изменил голос: ${targetText}`
+      : `${mention(voter)} проголосовал за ${targetText}`);
+    await this.updateVoteCounters(game.id, game.day);
+  }
+
+  async handleJudgmentVote(ctx: Context, gameId: number, day: number, choice: "yes" | "no"): Promise<void> {
+    if (!ctx.from) return;
+    const game = await this.db.getGame(gameId);
+    if (!game || game.status !== "running" || game.phase !== "judgment" || game.day !== day) {
+      await safeAnswerCallback(ctx, "Этот суд уже завершён", true);
+      return;
+    }
+    const voter = await this.db.getPlayer(game.id, String(ctx.from.id));
+    if (!voter?.alive) {
+      await safeAnswerCallback(ctx, "Голосовать могут только живые игроки", true);
+      return;
+    }
+    await safeAnswerCallback(ctx, "Голос учтён");
+    let votes = this.judgeVotes.get(game.id);
+    if (!votes) {
+      votes = new Map();
+      this.judgeVotes.set(game.id, votes);
+    }
+    votes.set(voter.user_id, choice);
+    await this.updateJudgmentKeyboard(game, votes);
   }
 
   async showPlayers(ctx: Context): Promise<void> {
@@ -405,7 +521,7 @@ export class GameEngine {
     }
     const players = await this.db.getPlayers(game.id, game.status === "running");
     await ctx.reply(game.status === "running"
-      ? alivePlayersText(players)
+      ? alivePlayersText(players, game.settings)
       : lobbyText(this.config.brandName, game, players), { parse_mode: "HTML" });
   }
 
@@ -417,6 +533,7 @@ export class GameEngine {
       return;
     }
     this.clearTimers(game.id);
+    this.clearVoteState(game.id);
     await this.db.cancelGame(game.id);
     await this.db.recordAudit(game.chat_id, game.id, String(ctx.from.id), "stop_game");
     await ctx.reply("🛑 Игра отменена. Новый набор: /newgame");
@@ -563,27 +680,107 @@ export class GameEngine {
     if (!ctx.from) return;
     const profile = await this.db.getProfile(userData(ctx.from));
     const displayName = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
-    await ctx.reply(profileText(displayName, profile), { parse_mode: "HTML" });
+    await this.replyOrEdit(ctx, profileText(displayName, profile), profileKeyboard());
+  }
+
+  async openShop(ctx: Context): Promise<void> {
+    await safeAnswerCallback(ctx);
+    if (!ctx.from) return;
+    const profile = await this.db.getProfile(userData(ctx.from));
+    await this.replyOrEdit(ctx, shopText(profile), shopKeyboard());
+  }
+
+  async backToProfile(ctx: Context): Promise<void> {
+    await safeAnswerCallback(ctx);
+    if (!ctx.from) return;
+    const profile = await this.db.getProfile(userData(ctx.from));
+    const displayName = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
+    await this.replyOrEdit(ctx, profileText(displayName, profile), profileKeyboard());
   }
 
   async showShop(ctx: Context): Promise<void> {
     if (!ctx.from) return;
     const profile = await this.db.getProfile(userData(ctx.from));
-    await ctx.reply(shopText(profile), { parse_mode: "HTML", reply_markup: shopKeyboard() });
+    await this.replyOrEdit(ctx, shopText(profile), shopKeyboard());
   }
 
   async handleShopPurchase(ctx: Context, item: ShopItem): Promise<void> {
     if (!ctx.from) return;
-    const price = SHOP_ITEMS[item].price;
-    const { ok, profile } = await this.db.buyShopItem(userData(ctx.from), item, price);
+    const shopItem = SHOP_ITEMS[item];
+    const { ok, profile } = await this.db.buyShopItem(userData(ctx.from), item, shopItem.price, shopItem.currency);
     if (!ok) {
-      await ctx.answerCbQuery("Недостаточно денег 💵", { show_alert: true });
+      await ctx.answerCbQuery(`Недостаточно ${currencyLabel(shopItem.currency)}`, { show_alert: true });
       return;
     }
-    await ctx.answerCbQuery(`Куплено: ${SHOP_ITEMS[item].title} ✅`);
+    await ctx.answerCbQuery(`Куплено: ${shopItem.title} ✅`);
     try {
       await ctx.editMessageText(shopText(profile), { parse_mode: "HTML", reply_markup: shopKeyboard() });
     } catch { /* message unchanged or too old to edit */ }
+  }
+
+  async handleBuyCurrency(ctx: Context, _currency: Currency): Promise<void> {
+    await safeAnswerCallback(ctx);
+    if (!ctx.from) return;
+    await ctx.reply(
+      "Пополнение валюты появится позже. Пока 💵 монеты и 💎 камни можно получить за участие в играх.",
+      { parse_mode: "HTML" }
+    );
+  }
+
+  async giveCurrency(ctx: Context, rawText: string): Promise<void> {
+    if (!ctx.from) return;
+    if (!this.config.ownerTelegramId || String(ctx.from.id) !== this.config.ownerTelegramId) {
+      await ctx.reply("Эта команда доступна только владельцу бота.");
+      return;
+    }
+
+    const replied = repliedUser(ctx);
+    const tokens = rawText.trim().split(/\s+/).filter(Boolean);
+
+    let targetUser = replied;
+    let rest = tokens;
+    if (!targetUser) {
+      const ref = tokens[0];
+      if (!ref) {
+        await ctx.reply("Использование: /give @username money 500 (или ответьте на сообщение игрока)");
+        return;
+      }
+      const found = await this.db.findUserByRef(ref);
+      if (!found) {
+        await ctx.reply(`Игрок «${escapeHtml(ref)}» не найден. Убедитесь, что это @username или числовой ID.`, { parse_mode: "HTML" });
+        return;
+      }
+      targetUser = { id: Number(found.id), username: found.username, first_name: found.firstName };
+      rest = tokens.slice(1);
+    }
+
+    const currencyToken = rest[0]?.toLowerCase();
+    const amount = Number(rest[1]);
+    if ((currencyToken !== "money" && currencyToken !== "gems") || !Number.isInteger(amount) || amount <= 0 || amount > 10_000_000) {
+      await ctx.reply("Использование: /give @username money 500 (или gems). Сумма — целое число от 1 до 10 000 000.");
+      return;
+    }
+    const currency: Currency = currencyToken === "gems" ? "gems" : "money";
+
+    const profile = await this.db.grantCurrency(userData(targetUser), currency, amount);
+    const label = currency === "money" ? "💵 монет" : "💎 камней";
+    const targetName = targetUser.username ? `@${targetUser.username}` : targetUser.first_name;
+    await ctx.reply(
+      `✅ Начислено <b>${amount}</b> ${label} игроку <b>${escapeHtml(targetName)}</b>.\n` +
+      `Текущий баланс: 💵 <b>${profile.money}</b> · 💎 <b>${profile.gems}</b>`,
+      { parse_mode: "HTML" }
+    );
+  }
+
+  private async replyOrEdit(ctx: Context, text: string, keyboard: InlineKeyboardMarkup): Promise<void> {
+    const message = ctx.callbackQuery?.message;
+    if (message && "message_id" in message) {
+      try {
+        await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+        return;
+      } catch { /* message unchanged or too old to edit */ }
+    }
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
   }
 
   async showStats(ctx: Context): Promise<void> {
@@ -656,6 +853,7 @@ export class GameEngine {
       force_next_phase: "переключил фазу",
       kick_player: "исключил игрока",
       transfer_host: "передал ведущего",
+      leave_game: "покинул игру",
       change_setting: "изменил настройку"
     };
     const lines = entries.map((entry) => {
@@ -793,6 +991,9 @@ export class GameEngine {
           const allPlayers = await this.db.getPlayers(game.id);
           for (const player of allPlayers.filter((item) => item.alive === 1)) await this.sendRoleCard(player, allPlayers, game);
           await this.sendNightPrompts(game.id);
+        } else if (game.phase === "judgment" && game.pending_elimination_id) {
+          const candidate = await this.db.getPlayer(game.id, game.pending_elimination_id);
+          if (candidate) await this.openJudgment(game, candidate);
         }
       } catch (error) {
         this.logger.warn(`Не удалось восстановить игру ${game.id}`, error);
@@ -803,6 +1004,7 @@ export class GameEngine {
   shutdown(): void {
     for (const gameId of new Set([...this.phaseTimers.keys(), ...this.warningTimers.keys(), ...this.promptTimers.keys()])) {
       this.clearTimers(gameId);
+      this.clearVoteState(gameId);
     }
   }
 
@@ -820,12 +1022,17 @@ export class GameEngine {
 
   private lobbyKeyboard(gameId: number): InlineKeyboardMarkup {
     return Markup.inlineKeyboard([
-      [Markup.button.url("🤵🏻 Присоединиться", this.joinUrl(gameId))]
+      [Markup.button.url("👤 Присоединиться", this.joinUrl(gameId))],
+      [Markup.button.callback("▶️ Начать игру", `begin:${gameId}`), Markup.button.callback("🔄 Обновить", `refresh:${gameId}`)]
     ]).reply_markup;
   }
 
   private openBotKeyboard(): InlineKeyboardMarkup {
     return Markup.inlineKeyboard([Markup.button.url("🌙 Перейти к боту", `https://t.me/${this.botUsername}`)]).reply_markup;
+  }
+
+  private voteFromGroupKeyboard(): InlineKeyboardMarkup {
+    return Markup.inlineKeyboard([Markup.button.url("Голосовать ↗", `https://t.me/${this.botUsername}`)]).reply_markup;
   }
 
   private joinUrl(gameId: number): string {
@@ -858,9 +1065,7 @@ export class GameEngine {
   private async sendRoleCard(player: PlayerRow, allPlayers: PlayerRow[], game: GameRow): Promise<void> {
     if (!player.role) throw new Error(`У игрока ${player.user_id} нет роли`);
     const lines = [
-      `🎴 <b>${escapeHtml(this.config.brandName)} · Ваша роль</b>`,
-      "",
-      roleLabel(player.role),
+      `Ты - ${roleRevealTitle(player.role)}!`,
       roleDescription(player.role),
       "",
       `Игра: <b>${escapeHtml(game.chat_title)}</b> · ID ${game.id}`
@@ -871,22 +1076,39 @@ export class GameEngine {
         ? team.map((member) => `• ${mention(member)} — ${roleLabel(member.role!)}`)
         : ["Вы действуете в одиночку."]), "", "Тайный обмен сообщениями: <code>/mafia текст</code>");
     }
+    if (player.role === "commissar") {
+      const sergeant = allPlayers.find((candidate) => candidate.role === "sergeant" && candidate.alive === 1);
+      if (sergeant) lines.push("", `<b>Ваш напарник:</b> ${mention(sergeant)} — 🎖️ Сержант. Ему приходят копии ваших проверок.`);
+    }
+    if (player.role === "sergeant") {
+      const commissar = allPlayers.find((candidate) => candidate.role === "commissar" && candidate.alive === 1);
+      if (commissar) lines.push("", `<b>Ваш напарник:</b> ${mention(commissar)} — 👮 Комиссар. Вы получаете копии его проверок.`);
+      else lines.push("", "Комиссар погиб. Сегодня вы принимаете его роль.");
+    }
     await this.bot.telegram.sendMessage(player.user_id, lines.join("\n"), privateHtml());
   }
 
   private async sendNightPrompts(gameId: number): Promise<void> {
     const game = await this.db.getGame(gameId);
     if (!game || game.phase !== "night" || game.status !== "running") return;
-    const alive = await this.db.getPlayers(game.id, true);
+    const allPlayers = await this.db.getPlayers(game.id);
+    const alive = allPlayers.filter((player) => player.alive === 1);
     for (const actor of alive) {
-      if (!actor.role) continue;
+      const role = effectiveNightRole(actor, allPlayers);
+      if (!nightActionsForRole(role, game.settings).length) continue;
       try {
-        for (const type of nightActionsForRole(actor.role, game.settings)) {
+        if (role === "commissar") {
+          await this.sendCommissionerPrompt(game, actor);
+          continue;
+        }
+        for (const type of nightActionsForRole(role, game.settings)) {
           const targets = await this.validTargets(type, actor, alive, game);
           if (!targets.length) continue;
           const oneTime = type === "don_check" || type === "commissar_check" || type === "commissar_shoot";
+          const intro = nightFlavorIntro(type, actor);
+          const hint = oneTime ? "Действие выполняется один раз." : "Выбор можно изменить до конца ночи.";
           await this.bot.telegram.sendMessage(actor.user_id,
-            `<b>Ночь ${game.day}</b>\n${ACTION_TITLES[type]}\n${oneTime ? "Действие выполняется один раз." : "Выбор можно изменить до конца ночи."}`, {
+            `🌃 <b>Ночь ${game.day}</b>\n\n${intro}\n\n${hint}`, {
               ...privateHtml(),
               reply_markup: targetKeyboard(game.id, game.day, type, targets)
             });
@@ -897,14 +1119,32 @@ export class GameEngine {
     }
   }
 
+  private async sendCommissionerPrompt(game: GameRow, actor: PlayerRow): Promise<void> {
+    const canShoot = game.settings.commissionerCanShoot;
+    const text = canShoot
+      ? "Пришло время действовать!\nТы можешь проверить игрока или убить кого-нибудь наугад..."
+      : "Пришло время действовать!\nТы можешь проверить игрока на связь с мафией...";
+    const keyboard = canShoot
+      ? Markup.inlineKeyboard([
+          [Markup.button.callback("🔍 Проверить", `cc:${game.id}:${game.day}:check`)],
+          [Markup.button.callback("🔫 Убить", `cc:${game.id}:${game.day}:shoot`)]
+        ]).reply_markup
+      : Markup.inlineKeyboard([
+          [Markup.button.callback("🔍 Проверить", `cc:${game.id}:${game.day}:check`)]
+        ]).reply_markup;
+    await this.bot.telegram.sendMessage(actor.user_id, text, { ...privateHtml(), reply_markup: keyboard });
+  }
+
   private async validTargets(type: ActionType, actor: PlayerRow, alive: PlayerRow[], game: GameRow): Promise<PlayerRow[]> {
     const previousDoctorTarget = type === "doctor_heal"
       ? await this.db.getPreviousTarget(game.id, actor.user_id, "doctor_heal", game.day)
       : undefined;
     return alive.filter((target) => {
-      if (type !== "doctor_heal" && target.user_id === actor.user_id) return false;
+      if (type !== "doctor_heal" && type !== "lawyer_defend" && type !== "mistress_visit" && target.user_id === actor.user_id) return false;
+      if (type === "mistress_visit" && target.user_id === actor.user_id) return false;
       if (type === "doctor_heal" && target.user_id === actor.user_id && !game.settings.doctorSelfHeal) return false;
-      if (type === "mafia_kill" && (target.role === "mafia" || target.role === "don")) return false;
+      if (type === "mafia_kill" && !game.settings.friendlyFire && isMafiaTeam(target.role)) return false;
+      if (type === "commissar_shoot" && !game.settings.friendlyFire && target.role === "sergeant") return false;
       if (type === "doctor_heal" && target.user_id === previousDoctorTarget) return false;
       return true;
     });
@@ -947,6 +1187,16 @@ export class GameEngine {
     this.promptTimers.delete(gameId);
   }
 
+  private clearVoteState(gameId: number): void {
+    this.nightFlavorPosted.delete(gameId);
+    this.voteCandidates.delete(gameId);
+    for (const key of this.voteMessages.keys()) {
+      if (key.startsWith(`${gameId}:`)) this.voteMessages.delete(key);
+    }
+    this.judgeVotes.delete(gameId);
+    this.judgeMessageId.delete(gameId);
+  }
+
   private async onPhaseTimer(gameId: number): Promise<void> {
     const game = await this.db.getGame(gameId);
     if (!game || game.status !== "running" || game.phase === "paused") return;
@@ -955,12 +1205,12 @@ export class GameEngine {
       return;
     }
     if (game.phase === "night") await this.resolveNight(game);
-    else if (game.phase === "day") {
-      if (game.settings.nominationsEnabled) await this.openNominations(game);
-      else await this.openVoting(game, await this.db.getPlayers(game.id, true));
-    } else if (game.phase === "nomination") await this.openVotingFromNominations(game);
+    else if (game.phase === "day") await this.openVoting(game, await this.db.getPlayers(game.id, true));
+    // Legacy-миграция: игры, оставшиеся в удалённой фазе «выдвижение», сразу переходят к голосованию.
+    else if ((game.phase as string) === "nomination") await this.openVoting(game, await this.db.getPlayers(game.id, true));
     else if (game.phase === "vote") await this.resolveVoting(game);
     else if (game.phase === "last_word") await this.finalizeLastWord(game);
+    else if (game.phase === "judgment") await this.resolveJudgment(game);
   }
 
   private async resolveNight(game: GameRow): Promise<void> {
@@ -970,36 +1220,58 @@ export class GameEngine {
     const actions = await this.db.getActions(game.id, game.day);
     const afkIds = await this.applyNightAfk(game, aliveBefore, actions);
 
-    const mafiaVotes = actions.filter((action) => {
-      if (action.type !== "mafia_kill" || !aliveIds.has(action.actor_id) || !aliveIds.has(action.target_id)) return false;
+    // Щиты Счастливчиков читаются только (фиксируются при сходе к стабильному решению).
+    const shield = new Map(players.filter((player) => player.alive === 1).map((player) => [player.user_id, player.lucky_shield]));
+
+    let blocked = new Set<string>();
+    let effActions = actions;
+    let deathResult = computeNightDeaths(actions, players, aliveIds, shield);
+    for (let iter = 0; iter < 6; iter += 1) {
+      const nextBlocked = new Set<string>();
+      for (const act of actions) {
+        if (act.type !== "mistress_visit") continue;
+        const mistress = players.find((player) => player.user_id === act.actor_id);
+        if (!mistress || mistress.alive !== 1) continue;
+        if (deathResult.deaths.has(mistress.user_id)) continue; // сама Любовница убита — блок не срабатывает
+        nextBlocked.add(act.target_id);
+      }
+      const nextEff = actions.filter((action) =>
+        aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) &&
+        !deathResult.deaths.has(action.actor_id) && !nextBlocked.has(action.actor_id) &&
+        canPerform(players.find((player) => player.user_id === action.actor_id), action.type, players)
+      );
+      const nextDeath = computeNightDeaths(nextEff, players, aliveIds, shield);
+      const stable = sameSets(nextDeath.deaths, deathResult.deaths) && sameSets(nextBlocked, blocked);
+      blocked = nextBlocked;
+      effActions = nextEff;
+      deathResult = nextDeath;
+      if (stable) break;
+    }
+
+    const attackDeaths = [...deathResult.deaths];
+    const killedIds = [...new Set([...attackDeaths, ...afkIds])];
+    const revengeIds = await this.kamikazeNightRevenge(game.id, players, attackDeaths, killedIds);
+    const allKilledIds = [...new Set([...killedIds, ...revengeIds])];
+    await this.db.killPlayers(game.id, allKilledIds);
+
+    for (const id of deathResult.shieldBreaks) await this.db.setLuckyShield(game.id, id, 0);
+
+    await this.sendBumReports(game, players, effActions);
+
+    const killed = allKilledIds.map((id) => players.find((player) => player.user_id === id)).filter(isPlayer);
+    const afkSet = new Set(afkIds);
+    const revengeSet = new Set(revengeIds);
+    const savedCount = deathResult.savedCount;
+    const performedActions = actions.filter((action) => !blocked.has(action.actor_id));
+    const mafiaVotes = effActions.filter((action) => {
       const actor = players.find((player) => player.user_id === action.actor_id);
-      const target = players.find((player) => player.user_id === action.target_id);
-      return !!actor && !!target && (actor.role === "mafia" || actor.role === "don") && target.role !== "mafia" && target.role !== "don";
+      return action.type === "mafia_kill" && !!actor && (actor.role === "mafia" || actor.role === "don");
     });
     const mafiaTarget = selectPluralityTarget(mafiaVotes.map((action) => action.target_id));
-    const maniacTarget = validSingleActionTarget(actions, players, aliveIds, "maniac_kill", "maniac");
-    const commissionerTarget = validSingleActionTarget(actions, players, aliveIds, "commissar_shoot", "commissar");
-    const healed = new Set(actions.filter((action) => {
-      const actor = players.find((player) => player.user_id === action.actor_id);
-      return action.type === "doctor_heal" && aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) && actor?.role === "doctor";
-    }).map((action) => action.target_id));
-
-    const attacked = new Set<string>();
-    if (mafiaTarget) attacked.add(mafiaTarget);
-    if (maniacTarget) attacked.add(maniacTarget);
-    if (commissionerTarget) attacked.add(commissionerTarget);
-    const attackDeaths = [...attacked].filter((id) => !healed.has(id));
-    const killedIds = [...new Set([...attackDeaths, ...afkIds])];
-    await this.db.killPlayers(game.id, killedIds);
-    await this.sendBumReports(game, players, actions);
-
-    const killed = killedIds.map((id) => players.find((player) => player.user_id === id)).filter(isPlayer);
-    const afkSet = new Set(afkIds);
-    const savedCount = [...attacked].filter((id) => healed.has(id)).length;
     const winner = determineWinner(await this.db.getPlayers(game.id, true));
     if (winner) {
       await this.cleanupPhaseMessages(game);
-      await this.sendMorningSummary(game, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length);
+      await this.sendMorningSummary(game, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, performedActions);
       await this.finishGame(game, winner);
       return;
     }
@@ -1008,38 +1280,73 @@ export class GameEngine {
     await this.db.setPhase(game.id, "day", game.day, endsAt);
     const current = (await this.db.getGame(game.id))!;
     await this.cleanupPhaseMessages(current);
-    await this.sendPhaseMedia(current, "day", `🌇 <b>День ${game.day}</b> · город просыпается`);
-    await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length);
-    await this.sendTracked(current, [alivePlayersText(await this.db.getPlayers(game.id, true)), "", `💬 Обсуждение: <b>${game.settings.daySeconds} сек.</b>`].join("\n"));
+    await this.sendPhaseMedia(current, "day", `🏙 <b>День ${game.day}</b>\nСолнце всходит, подсушивая на тротуарах пролитую ночью кровь...`);
+    await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, performedActions);
+    await this.sendTracked(current, [alivePlayersText(await this.db.getPlayers(game.id, true), game.settings), "", "Сейчас самое время обсудить результаты ночи, разобраться в причинах и следствиях..."].join("\n"));
     this.schedulePhase(game.id, endsAt);
   }
 
-  private async sendMorningSummary(game: GameRow, killed: PlayerRow[], afkSet: Set<string>, savedCount: number, mafiaTarget: string | null, mafiaVotes: number): Promise<void> {
-    const lines = ["🌇 <b>Итоги ночи</b>"];
-    const attackedKilled = killed.filter((player) => !afkSet.has(player.user_id));
-    if (!attackedKilled.length) lines.push("Город проснулся без жертв нападений.");
+  private async sendMorningSummary(game: GameRow, killed: PlayerRow[], afkSet: Set<string>, savedCount: number, mafiaTarget: string | null, mafiaVotes: number, revengeSet: Set<string>, players: PlayerRow[], actions: ActionRow[]): Promise<void> {
+    const attackedKilled = killed.filter((player) => !afkSet.has(player.user_id) && !revengeSet.has(player.user_id));
+    if (!attackedKilled.length && !revengeSet.size) {
+      await this.sendTracked(game, "Город проснулся без жертв нападений.");
+    }
+
     for (const victim of attackedKilled) {
-      lines.push(`Убит(а) ${mention(victim)}${game.settings.revealDeadRoles && victim.role ? ` — ${roleLabel(victim.role)}` : ""}.`);
+      const title = game.settings.revealDeadRoles && victim.role
+        ? `Сегодня был жестоко ${roleLabel(victim.role)} ${mention(victim)}…`
+        : `Сегодня был ${mention(victim)}…`;
+      const guests = this.nightGuests(victim, players, actions);
+      await this.sendTracked(game, guests.length
+        ? `${title}\nГоворят, у него в гостях был ${guests.map((guest) => `${roleLabel(guest.role!)} ${mention(guest)}`).join(" и ")}`
+        : title);
     }
+
+    for (const victim of killed.filter((player) => revengeSet.has(player.user_id))) {
+      await this.sendTracked(game, `💣 Камикадзе утянул(а) с собой ${mention(victim)}${game.settings.revealDeadRoles && victim.role ? ` — ${roleLabel(victim.role)}` : ""}.`);
+    }
+
     for (const player of killed.filter((item) => afkSet.has(item.user_id))) {
-      lines.push(`💤 ${mention(player)} выбыл(а) за бездействие${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
+      await this.sendTracked(game, `💤 ${mention(player)} выбыл(а) за бездействие${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
     }
-    if (savedCount) lines.push("👨‍⚕️ Доктор предотвратил нападение.");
-    if (!mafiaTarget && mafiaVotes) lines.push("🔪 Мафия не смогла договориться.");
-    await this.sendTracked(game, lines.join("\n"));
+
+    if (savedCount) await this.sendTracked(game, "👨🏼‍⚕️ Доктор предотвратил нападение.");
+    if (!mafiaTarget && mafiaVotes) await this.sendTracked(game, "🤵🏻 Мафия не смогла договориться.");
+  }
+
+  private nightGuests(victim: PlayerRow, players: PlayerRow[], actions: ActionRow[]): PlayerRow[] {
+    const aliveIds = new Set(players.filter((player) => player.alive === 1).map((player) => player.user_id));
+    const visitingTypes = new Set<ActionType>(["doctor_heal", "commissar_check", "don_check", "bum_visit"]);
+    const guestIds = new Set<string>();
+    for (const action of actions) {
+      if (action.target_id !== victim.user_id) continue;
+      if (action.actor_id === victim.user_id) continue;
+      if (!visitingTypes.has(action.type)) continue;
+      if (!aliveIds.has(action.actor_id)) continue;
+      guestIds.add(action.actor_id);
+    }
+    return players.filter((player) => guestIds.has(player.user_id) && player.role);
   }
 
   private async applyNightAfk(game: GameRow, players: PlayerRow[], actions: ActionRow[]): Promise<string[]> {
     if (!game.settings.afkLimit) return [];
     const inactive: string[] = [];
     for (const player of players) {
-      if (!player.role || player.role === "citizen") continue;
+      if (!player.role) continue;
+      const role = effectiveNightRole(player, players);
+      if (!nightActionsForRole(role, game.settings).length) continue;
       const acted = actions.some((action) => action.actor_id === player.user_id);
       const strikes = acted ? 0 : player.afk_strikes + 1;
       await this.db.setAfkStrikes(game.id, player.user_id, strikes);
       if (!acted && strikes >= game.settings.afkLimit) inactive.push(player.user_id);
     }
     return inactive;
+  }
+
+  private async lawyerDefended(gameId: number, day: number, targetId: string): Promise<boolean> {
+    const lawyerDefend = await this.db.getActions(gameId, day, "lawyer_defend");
+    const alive = (await this.db.getPlayers(gameId, true)).map((player) => player.user_id);
+    return lawyerDefend.some((action) => action.target_id === targetId && alive.includes(action.actor_id));
   }
 
   private async sendBumReports(game: GameRow, players: PlayerRow[], actions: ActionRow[]): Promise<void> {
@@ -1060,86 +1367,87 @@ export class GameEngine {
     }
   }
 
-  private async openNominations(game: GameRow): Promise<void> {
-    const current = await this.db.getGame(game.id);
-    if (!current || current.phase !== "day") return;
-    const alive = await this.db.getPlayers(game.id, true);
-    const endsAt = Date.now() + game.settings.nominationSeconds * 1000;
-    await this.db.setPhase(game.id, "nomination", game.day, endsAt);
-    const updated = (await this.db.getGame(game.id))!;
-    await this.cleanupPhaseMessages(updated);
-    await this.sendTracked(updated, [
-      "📣 <b>Выдвижение кандидатур</b>",
-      `У вас <b>${game.settings.nominationSeconds} сек.</b>`,
-      "Каждый живой игрок выдвигает кандидата в личных сообщениях с ботом."
-    ].join("\n"), this.openBotKeyboard());
-    await this.sendNominationPrompts(updated, alive);
-    this.schedulePhase(game.id, endsAt);
+  private async kamikazeNightRevenge(gameId: number, players: PlayerRow[], attackDeaths: string[], excludeIds: string[]): Promise<string[]> {
+    const revengeIds: string[] = [];
+    const unavailable = new Set(excludeIds);
+    for (const deadId of attackDeaths) {
+      const dead = players.find((player) => player.user_id === deadId);
+      if (!dead || dead.role !== "kamikaze") continue;
+      const candidates = players.filter((player) => player.alive === 1 && !unavailable.has(player.user_id) && player.user_id !== deadId);
+      if (!candidates.length) continue;
+      const victim = candidates[randomInt(candidates.length)]!;
+      revengeIds.push(victim.user_id);
+      unavailable.add(victim.user_id);
+    }
+    return revengeIds;
   }
 
-  private async sendNominationPrompts(game: GameRow, alive: PlayerRow[]): Promise<void> {
-    for (const player of alive) {
-      try {
-        await this.bot.telegram.sendMessage(player.user_id, [
-          "📣 <b>Пришло время выдвигать кандидатов!</b>",
-          "Кого вы хотите выдвинуть на голосование?"
-        ].join("\n"), {
-          ...privateHtml(),
-          reply_markup: nominationKeyboard(game.id, game.day, alive)
-        });
-      } catch (error) {
-        this.logger.warn(`Не удалось отправить выдвижение игроку ${player.user_id}`, error);
-      }
-    }
-  }
-
-  private async openVotingFromNominations(game: GameRow): Promise<void> {
-    const current = await this.db.getGame(game.id);
-    if (!current || current.phase !== "nomination") return;
-    const alive = await this.db.getPlayers(game.id, true);
-    const aliveIds = new Set(alive.map((player) => player.user_id));
-    const nominations = await this.db.getNominations(game.id, game.day);
-    const candidateIds = [...new Set(nominations.map((item) => item.target_id))].filter((id) => aliveIds.has(id));
-    const candidates = candidateIds.map((id) => alive.find((player) => player.user_id === id)).filter(isPlayer);
-    if (!candidates.length) {
-      await this.cleanupPhaseMessages(game);
-      await this.sendTracked(game, "Кандидатов нет. Город переходит к ночи.");
-      await this.startNextNight(game.id, game.day + 1);
-      return;
-    }
-    await this.openVoting(game, candidates);
+  private async kamikazeVoteRevenge(game: GameRow, player: PlayerRow): Promise<string | null> {
+    if (player.role !== "kamikaze") return null;
+    const aliveIds = new Set((await this.db.getPlayers(game.id, true)).map((item) => item.user_id));
+    const votes = (await this.db.getVotes(game.id, game.day)).filter((vote) => vote.target_id === player.user_id && aliveIds.has(vote.voter_id));
+    const voters = votes.filter((vote) => vote.voter_id !== player.user_id).map((vote) => vote.voter_id);
+    if (!voters.length) return null;
+    return voters[randomInt(voters.length)]!;
   }
 
   private async openVoting(game: GameRow, candidates: PlayerRow[]): Promise<void> {
-    const alive = await this.db.getPlayers(game.id, true);
     const endsAt = Date.now() + game.settings.voteSeconds * 1000;
     await this.db.setPhase(game.id, "vote", game.day, endsAt);
     const updated = (await this.db.getGame(game.id))!;
     await this.cleanupPhaseMessages(updated);
     await this.sendTracked(updated, [
-      "⚖️ <b>Голосование</b>",
-      `Время: <b>${game.settings.voteSeconds} сек.</b>`,
-      `Кандидаты: ${candidates.map((player) => mention(player)).join(", ")}`,
-      "Голосуйте в личных сообщениях с ботом."
-    ].join("\n"), this.openBotKeyboard());
-    await this.sendTracked(updated, `Право голоса имеют <b>${alive.length}</b> живых игроков.`);
+      "<b>Пришло время определить и наказать виноватых.</b>",
+      `Голосование продлится ${game.settings.voteSeconds} секунд`
+    ].join("\n"), this.voteFromGroupKeyboard());
+    this.voteCandidates.set(game.id, candidates);
     await this.sendVotePrompts(updated, candidates);
     this.schedulePhase(game.id, endsAt);
   }
 
   private async sendVotePrompts(game: GameRow, candidates: PlayerRow[]): Promise<void> {
     const alive = await this.db.getPlayers(game.id, true);
+    const counts = await this.voteCounts(game);
     for (const voter of alive) {
       try {
-        await this.bot.telegram.sendMessage(voter.user_id, [
-          "🔥 <b>Пришло время искать виноватых!</b>",
-          "Кого ты хочешь линчевать?"
+        const message = await this.bot.telegram.sendMessage(voter.user_id, [
+          "🔥 <b>Пришло время определить и наказать виноватых.</b>",
+          "Выберите, кого вы хотите линчевать."
         ].join("\n"), {
           ...privateHtml(),
-          reply_markup: voteKeyboard(game.id, game.day, candidates, game.settings.allowSkipVote)
+          reply_markup: voteKeyboard(game.id, game.day, candidates, game.settings.allowSkipVote, counts)
         });
+        this.voteMessages.set(`${game.id}:${game.day}:${voter.user_id}`, message.message_id);
       } catch (error) {
         this.logger.warn(`Не удалось отправить голосование игроку ${voter.user_id}`, error);
+      }
+    }
+  }
+
+  private async voteCounts(game: GameRow): Promise<Map<string, number>> {
+    const votes = await this.db.getVotes(game.id, game.day);
+    const counts = new Map<string, number>();
+    for (const vote of votes) {
+      counts.set(vote.target_id, (counts.get(vote.target_id) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  private async updateVoteCounters(gameId: number, day: number): Promise<void> {
+    const game = await this.db.getGame(gameId);
+    if (!game || game.status !== "running" || game.phase !== "vote" || game.day !== day) return;
+    const candidates = this.voteCandidates.get(gameId);
+    if (!candidates?.length) return;
+    const alive = await this.db.getPlayers(gameId, true);
+    const counts = await this.voteCounts(game);
+    const keyboard = voteKeyboard(gameId, day, candidates, game.settings.allowSkipVote, counts);
+    for (const voter of alive) {
+      const messageId = this.voteMessages.get(`${gameId}:${day}:${voter.user_id}`);
+      if (!messageId) continue;
+      try {
+        await this.bot.telegram.editMessageReplyMarkup(voter.user_id, messageId, undefined, keyboard);
+      } catch (error) {
+        this.logger.debug(`Не удалось обновить кнопки голосования игрока ${voter.user_id}`, error);
       }
     }
   }
@@ -1147,56 +1455,57 @@ export class GameEngine {
   private async resolveVoting(game: GameRow): Promise<void> {
     const current = await this.db.getGame(game.id);
     if (!current || current.phase !== "vote") return;
+    this.clearVoteState(game.id);
     const alive = await this.db.getPlayers(game.id, true);
     const aliveIds = new Set(alive.map((player) => player.user_id));
     const votes = (await this.db.getVotes(game.id, game.day)).filter((vote) => aliveIds.has(vote.voter_id) && (vote.target_id === "skip" || aliveIds.has(vote.target_id)));
 
-    const afkIds: string[] = [];
-    if (game.settings.afkLimit) {
-      const voters = new Set(votes.map((vote) => vote.voter_id));
-      for (const player of alive) {
-        const voted = voters.has(player.user_id);
-        const strikes = voted ? 0 : player.afk_strikes + 1;
-        await this.db.setAfkStrikes(game.id, player.user_id, strikes);
-        if (!voted && strikes >= game.settings.afkLimit) afkIds.push(player.user_id);
-      }
-      await this.db.killPlayers(game.id, afkIds);
+    const voters = new Set(votes.map((vote) => vote.voter_id));
+    const blocked = nightBlockedUsers(await this.db.getActions(game.id, game.day), await this.db.getPlayers(game.id));
+    const hanged: PlayerRow[] = [];
+    for (const player of alive) {
+      if (blocked.has(player.user_id)) continue;
+      if (voters.has(player.user_id)) continue;
+      hanged.push(player);
     }
+    if (hanged.length) await this.db.killPlayers(game.id, hanged.map((player) => player.user_id));
 
-    const selected = selectPluralityTarget(votes.map((vote) => vote.target_id));
-    const afkSet = new Set(afkIds);
-    const selectedPlayer = selected && selected !== "skip" && !afkSet.has(selected)
-      ? alive.find((player) => player.user_id === selected)
+    const aliveAfter = await this.db.getPlayers(game.id, true);
+    const afterIds = new Set(aliveAfter.map((player) => player.user_id));
+    const validVotes = votes.filter((vote) => vote.target_id === "skip" || afterIds.has(vote.target_id));
+    const selected = selectPluralityTarget(validVotes.map((vote) => vote.target_id));
+    const selectedPlayer = selected && selected !== "skip"
+      ? aliveAfter.find((player) => player.user_id === selected)
       : undefined;
     await this.cleanupPhaseMessages(game);
     const lines = ["⚖️ <b>Голосование окончено</b>"];
     if (!selected || selected === "skip") {
-      lines.push(!votes.length ? "Никто не проголосовал." : selected === "skip" ? "Город решил никого не изгонять." : "Голоса разделились. Никто не изгнан.");
+      lines.push(!validVotes.length ? "Никто не проголосовал." : selected === "skip" ? "Город решил никого не изгонять." : "Голоса разделились. Никто не изгнан.");
     } else if (!selectedPlayer) {
-      lines.push("Выбранный кандидат уже выбыл за бездействие.");
+      lines.push("Выбранный кандидат уже покинул город.");
     } else {
       lines.push(`${mention(selectedPlayer)} получает большинство голосов.`);
     }
-    for (const player of alive.filter((item) => afkSet.has(item.user_id))) {
-      lines.push(`💤 ${mention(player)} выбыл(а) за пропуск голосований${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
+    for (const player of hanged) {
+      lines.push(eliminationDeathLine(player, game.settings.revealDeadRoles));
     }
     await this.sendTracked(game, lines.join("\n"));
 
     if (!selectedPlayer) {
-      const winnerAfterAfk = determineWinner(await this.db.getPlayers(game.id, true));
-      if (winnerAfterAfk) await this.finishGame(game, winnerAfterAfk);
+      const winnerAfter = determineWinner(await this.db.getPlayers(game.id, true));
+      if (winnerAfter) await this.finishGame(game, winnerAfter);
       else await this.startNextNight(game.id, game.day + 1);
       return;
     }
+    await this.db.setPendingElimination(game.id, selectedPlayer.user_id);
     if (game.settings.lastWordSeconds > 0) {
       const endsAt = Date.now() + game.settings.lastWordSeconds * 1000;
-      await this.db.setPendingElimination(game.id, selectedPlayer.user_id);
       await this.db.setPhase(game.id, "last_word", game.day, endsAt);
       const updated = (await this.db.getGame(game.id))!;
       await this.sendTracked(updated, `🎙 ${mention(selectedPlayer)}, ваше последнее слово. У вас <b>${game.settings.lastWordSeconds} сек.</b>`);
       this.schedulePhase(game.id, endsAt);
     } else {
-      await this.eliminateVotedPlayer(game, selectedPlayer);
+      await this.openJudgment((await this.db.getGame(game.id))!, selectedPlayer);
     }
   }
 
@@ -1209,14 +1518,89 @@ export class GameEngine {
       await this.startNextNight(game.id, game.day + 1);
       return;
     }
-    await this.eliminateVotedPlayer(current, player);
+    await this.openJudgment(current, player);
+  }
+
+  private async openJudgment(game: GameRow, candidate: PlayerRow): Promise<void> {
+    const current = await this.db.getGame(game.id);
+    if (!current || current.phase === "finished") return;
+    this.judgeVotes.delete(game.id);
+    const endsAt = Date.now() + game.settings.judgeSeconds * 1000;
+    await this.db.setPendingElimination(game.id, candidate.user_id);
+    await this.db.setPhase(game.id, "judgment", game.day, endsAt);
+    const updated = (await this.db.getGame(game.id))!;
+    await this.cleanupPhaseMessages(updated);
+    try {
+      const message = await this.bot.telegram.sendMessage(updated.chat_id,
+        `Вы точно хотите линчевать ${mention(candidate)}?`,
+        { parse_mode: "HTML", reply_markup: judgeKeyboard(game.id, game.day, { yes: 0, no: 0 }) });
+      this.judgeMessageId.set(game.id, message.message_id);
+    } catch (error) {
+      this.logger.warn(`Не удалось открыть суд Линча ${game.id}`, error);
+    }
+    this.schedulePhase(game.id, endsAt);
+  }
+
+  private async updateJudgmentKeyboard(game: GameRow, votes: Map<string, "yes" | "no">): Promise<void> {
+    const messageId = this.judgeMessageId.get(game.id);
+    if (!messageId) return;
+    let yes = 0, no = 0;
+    for (const value of votes.values()) {
+      if (value === "yes") yes += 1; else no += 1;
+    }
+    try {
+      await this.bot.telegram.editMessageReplyMarkup(game.chat_id, messageId, undefined,
+        judgeKeyboard(game.id, game.day, { yes, no }));
+    } catch (error) {
+      this.logger.debug(`Не удалось обновить счётчики суда ${game.id}`, error);
+    }
+  }
+
+  private async resolveJudgment(game: GameRow): Promise<void> {
+    const current = await this.db.getGame(game.id);
+    if (!current || current.phase !== "judgment") return;
+    const votes = this.judgeVotes.get(game.id) ?? new Map<string, "yes" | "no">();
+    let yes = 0, no = 0;
+    for (const value of votes.values()) {
+      if (value === "yes") yes += 1; else no += 1;
+    }
+    this.judgeVotes.delete(game.id);
+    this.judgeMessageId.delete(game.id);
+    const candidate = current.pending_elimination_id ? await this.db.getPlayer(game.id, current.pending_elimination_id) : undefined;
+    await this.cleanupPhaseMessages(game);
+
+    if (!candidate?.alive || no >= yes) {
+      await this.db.setPendingElimination(game.id, null);
+      await this.sendTracked(game, yes === 0 && no === 0
+        ? "Город не смог договориться о казни. Никто не изгнан."
+        : "Город пощадил подсудимого. Никто не изгнан.");
+      const winner = determineWinner(await this.db.getPlayers(game.id, true));
+      if (winner) await this.finishGame(game, winner);
+      else await this.startNextNight(game.id, game.day + 1);
+      return;
+    }
+    await this.eliminateVotedPlayer(game, candidate);
   }
 
   private async eliminateVotedPlayer(game: GameRow, player: PlayerRow): Promise<void> {
-    await this.db.killPlayers(game.id, [player.user_id]);
+    if (player.role === "suicide") {
+      await this.db.killPlayers(game.id, [player.user_id]);
+      await this.db.setPendingElimination(game.id, null);
+      await this.cleanupPhaseMessages(game);
+      await this.sendTracked(game, `💀 ${mention(player)} раскрывает свою сущность: город казнил Самоубийцу — он(а) победил(а)!`);
+      await this.finishGame(game, "suicide");
+      return;
+    }
+    const revengeId = await this.kamikazeVoteRevenge(game, player);
+    const revenge = revengeId ? await this.db.getPlayer(game.id, revengeId) : undefined;
+    await this.db.killPlayers(game.id, [player.user_id, ...(revenge ? [revenge.user_id] : [])]);
     await this.db.setPendingElimination(game.id, null);
     await this.cleanupPhaseMessages(game);
-    await this.sendTracked(game, `${mention(player)} покидает город${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
+    const playerLine = eliminationDeathLine(player, game.settings.revealDeadRoles);
+    const revengeLine = revenge
+      ? `\n💣 Камикадзе утянул(а) с собой ${mention(revenge)}${game.settings.revealDeadRoles && revenge.role ? ` — ${roleLabel(revenge.role)}` : ""}.`
+      : "";
+    await this.sendTracked(game, playerLine + revengeLine);
     const winner = determineWinner(await this.db.getPlayers(game.id, true));
     if (winner) await this.finishGame(game, winner);
     else await this.startNextNight(game.id, game.day + 1);
@@ -1237,8 +1621,12 @@ export class GameEngine {
         const current = await this.db.getGame(game.id);
         if (!current || current.phase !== "night" || current.day !== day) return;
         await this.cleanupPhaseMessages(current);
-        await this.sendPhaseMedia(current, "night", `🌃 <b>Ночь ${day}</b> · город засыпает`);
-        await this.sendTracked(current, `Активные роли делают выбор в личных сообщениях. На действия: <b>${game.settings.nightSeconds} сек.</b>`, this.openBotKeyboard());
+        await this.sendPhaseMedia(current, "night", `🌃 <b>Наступает ночь</b>\nНа улицы города выходят лишь самые отважные и бесстрашные. Утром попробуем сосчитать их головы...`);
+        await this.sendTracked(current, [
+          alivePlayersText(await this.db.getPlayers(game.id, true), undefined, false),
+          "",
+          `Спать осталось <b>${game.settings.nightSeconds} сек.</b>`
+        ].join("\n"), this.openBotKeyboard());
         await this.sendNightPrompts(game.id);
       })().catch((error) => this.logger.error(`Не удалось начать ночь ${day}`, error));
     }, delayMs));
@@ -1253,17 +1641,32 @@ export class GameEngine {
 
   private async finishGame(game: GameRow, winner: Winner): Promise<void> {
     this.clearTimers(game.id);
+    this.clearVoteState(game.id);
     await this.db.finishGame(game.id, winner);
     await this.cleanupPhaseMessages(game);
     const players = await this.db.getPlayers(game.id);
-    await this.bot.telegram.sendMessage(game.chat_id, [
-      winnerText(winner),
+    const { winners, others } = groupEndGamePlayers(players, winner);
+    const winnerLine = winner === "town" ? "Мирные жители"
+      : winner === "mafia" ? "Мафия"
+      : winner === "maniac" ? "Маньяк"
+      : winner === "suicide" ? "Самоубийца"
+      : "Любовница";
+
+    const lines: string[] = [
+      "<b>Игра окончена!</b>",
+      `Победили: ${winnerLine}`,
       "",
-      "Рейтинг: /top · Новая игра: /newgame"
-    ].join("\n"), { parse_mode: "HTML" });
-    const roleLines = players.map((player) => `${roleLabel(player.role!)} — ${mention(player)}`);
-    for (const part of chunkLines(roleLines, 3400)) {
-      await this.bot.telegram.sendMessage(game.chat_id, ["<b>Роли игроков:</b>", ...part].join("\n"), { parse_mode: "HTML" });
+      "<b>Победители:</b>",
+      ...(winners.length ? winners.map((player) => `• ${mention(player)} — ${roleLabel(player.role!)}`) : ["Никого нет."]),
+      "",
+      "<b>Остальные участники:</b>",
+      ...(others.length ? others.map((player) => `• ${mention(player)} — ${roleLabel(player.role!)}`) : ["Никого нет."]),
+      "",
+      `Игра длилась: ${durationText(Date.now() - (game.started_at ?? game.created_at))}`
+    ];
+
+    for (const part of chunkLines(lines, 3400)) {
+      await this.bot.telegram.sendMessage(game.chat_id, part.join("\n"), { parse_mode: "HTML" });
     }
     await this.sendEndGameProfiles(players);
   }
@@ -1288,6 +1691,20 @@ export class GameEngine {
     }
   }
 
+  private async postNightFlavor(game: GameRow, type: ActionType): Promise<void> {
+    const line = nightGroupFlavor(type);
+    if (!line) return;
+    const key = `${game.day}:${type}`;
+    let posted = this.nightFlavorPosted.get(game.id);
+    if (!posted) {
+      posted = new Set();
+      this.nightFlavorPosted.set(game.id, posted);
+    }
+    if (posted.has(key)) return;
+    posted.add(key);
+    await this.sendTracked(game, line);
+  }
+
   private async sendTracked(game: GameRow, text: string, replyMarkup?: InlineKeyboardMarkup): Promise<void> {
     try {
       const message = await this.bot.telegram.sendMessage(game.chat_id, text, {
@@ -1302,7 +1719,11 @@ export class GameEngine {
 
   private async sendPhaseMedia(game: GameRow, phase: "night" | "day", caption: string): Promise<void> {
     const message = await this.media.send(game.chat_id, phase, caption);
-    if (message && game.settings.autoDeleteMessages) await this.db.recordGameMessage(game.id, game.chat_id, message.message_id);
+    if (message) {
+      if (game.settings.autoDeleteMessages) await this.db.recordGameMessage(game.id, game.chat_id, message.message_id);
+    } else {
+      await this.sendTracked(game, caption);
+    }
   }
 
   private async cleanupPhaseMessages(game: GameRow): Promise<void> {
@@ -1327,7 +1748,43 @@ function nightActionsForRole(role: Role, settings: GameSettings): ActionType[] {
     case "doctor": return ["doctor_heal"];
     case "maniac": return ["maniac_kill"];
     case "bum": return ["bum_visit"];
+    case "kamikaze": return [];
+    case "sergeant": return [];
+    case "lawyer": return ["lawyer_defend"];
+    case "lucky": return [];
+    case "suicide": return [];
+    case "mistress": return ["mistress_visit"];
     case "citizen": return [];
+  }
+}
+
+function nightFlavorIntro(type: ActionType, actor: PlayerRow): string {
+  const name = playerName(actor);
+  switch (type) {
+    case "mafia_kill": return `🔪 <b>Мафия</b> выходит на охоту за жертвой…`;
+    case "don_check": return `🤵 <b>Дон ${name}</b> уже приступил к поискам Комиссара…`;
+    case "commissar_check": return `🕵️ <b>Комиссар ${name}</b> уже зарядил свой пистолет…`;
+    case "commissar_shoot": return `🔫 <b>Комиссар ${name}</b> уже взял цель на мушку…`;
+    case "doctor_heal": return `👨‍⚕️ <b>Доктор</b> вышел на ночное дежурство…`;
+    case "maniac_kill": return `🪓 <b>Маньяк</b> выходит на охоту…`;
+    case "bum_visit": return `🍾 <b>Бомж</b> отправился в гости…`;
+    case "lawyer_defend": return `🎩 <b>Адвокат</b> готовит алиби своему подзащитному…`;
+    case "mistress_visit": return `💋 <b>Любовница</b> выбирает, кого навестить этой ночью…`;
+  }
+}
+
+function nightGroupFlavor(type: ActionType): string | null {
+  switch (type) {
+    case "mafia_kill": return `<b>🤵🏻 Мафия</b> выбрала жертву...`;
+    case "don_check": return `<b>🤵🏻 Дон</b> отправился на поиски Комиссара...`;
+    case "commissar_check": return `<b>🕵️ Комиссар Каттани</b> уже зарядил свой пистолет...`;
+    case "commissar_shoot": return `<b>🔫 Комиссар Каттани</b> уже взял цель на мушку...`;
+    case "doctor_heal": return `<b>👨🏼‍⚕️ Доктор</b> вышел на ночное дежурство...`;
+    case "maniac_kill": return `<b>🪓 Маньяк</b> выбрал жертву...`;
+    case "bum_visit": return `<b>🧙🏼‍♂️ Бомж</b> пошёл к кому-то за бутылкой...`;
+    case "lawyer_defend": return `<b>🎩 Адвокат</b> подготовил алиби...`;
+    case "mistress_visit": return `<b>💋 Любовница</b> отправилась в гости...`;
+    default: return null;
   }
 }
 
@@ -1336,14 +1793,16 @@ function targetKeyboard(gameId: number, day: number, type: ActionType, players: 
   return Markup.inlineKeyboard(chunk(buttons, 2)).reply_markup;
 }
 
-function nominationKeyboard(gameId: number, day: number, players: PlayerRow[]): InlineKeyboardMarkup {
-  const buttons = players.map((player) => Markup.button.callback(plainPlayerName(player), `nom:${gameId}:${day}:${player.user_id}`));
-  return Markup.inlineKeyboard(chunk(buttons, 2)).reply_markup;
-}
-
-function voteKeyboard(gameId: number, day: number, players: PlayerRow[], allowSkip: boolean): InlineKeyboardMarkup {
-  const buttons = players.map((player) => Markup.button.callback(plainPlayerName(player), `vote:${gameId}:${day}:${player.user_id}`));
-  if (allowSkip) buttons.push(Markup.button.callback("⏭ Пропустить", `vote:${gameId}:${day}:skip`));
+function voteKeyboard(gameId: number, day: number, players: PlayerRow[], allowSkip: boolean, counts: Map<string, number>): InlineKeyboardMarkup {
+  const buttons = players.map((player) => {
+    const count = counts.get(player.user_id) ?? 0;
+    const label = count > 0 ? `${plainPlayerName(player)} · 👍 ${count}` : plainPlayerName(player);
+    return Markup.button.callback(label, `vote:${gameId}:${day}:${player.user_id}`);
+  });
+  if (allowSkip) {
+    const skipCount = counts.get("skip") ?? 0;
+    buttons.push(Markup.button.callback(skipCount > 0 ? `⏭ Пропустить · 👍 ${skipCount}` : "⏭ Пропустить", `vote:${gameId}:${day}:skip`));
+  }
   return Markup.inlineKeyboard(chunk(buttons, 2)).reply_markup;
 }
 
@@ -1352,24 +1811,34 @@ function settingsKeyboard(settings: GameSettings): InlineKeyboardMarkup {
   return Markup.inlineKeyboard([
     [Markup.button.callback(`👥 Мин. ${settings.minPlayers}`, "cfg:minplayers"), Markup.button.callback(`👥 Макс. ${settings.maxPlayers}`, "cfg:maxplayers")],
     [Markup.button.callback(`🌙 Ночь ${settings.nightSeconds}с`, "cfg:night"), Markup.button.callback(`☀️ День ${settings.daySeconds}с`, "cfg:day")],
-    [Markup.button.callback(`📣 Кандидаты ${settings.nominationSeconds}с`, "cfg:nomtime"), Markup.button.callback(`⚖️ Голос ${settings.voteSeconds}с`, "cfg:votetime")],
+    [Markup.button.callback(`⚖️ Голос ${settings.voteSeconds}с`, "cfg:votetime"), Markup.button.callback(`⚖️ Суд ${settings.judgeSeconds}с`, "cfg:judge")],
     [Markup.button.callback(`🎙 Слово ${settings.lastWordSeconds}с`, "cfg:lastword"), Markup.button.callback(`💤 AFK ${settings.afkLimit || "выкл"}`, "cfg:afk")],
-    [Markup.button.callback(`${flag(settings.nominationsEnabled)} Кандидатуры`, "cfg:nominations"), Markup.button.callback(`${flag(settings.revealDeadRoles)} Роли`, "cfg:reveal")],
+    [Markup.button.callback(`${flag(settings.revealDeadRoles)} Роли`, "cfg:reveal")],
     [Markup.button.callback(`${flag(settings.doctorSelfHeal)} Самолечение`, "cfg:selfheal"), Markup.button.callback(`${flag(settings.commissionerCanShoot)} Выстрел`, "cfg:shoot")],
     [Markup.button.callback(`${flag(settings.allowSelfVote)} За себя`, "cfg:selfvote"), Markup.button.callback(`${flag(settings.allowSkipVote)} Пропуск`, "cfg:skip")],
-    [Markup.button.callback(`${flag(settings.autoDeleteMessages)} Автоудаление`, "cfg:autodelete")],
+    [Markup.button.callback(`${flag(settings.autoDeleteMessages)} Автоудаление`, "cfg:autodelete"), Markup.button.callback(`${flag(settings.friendlyFire)} Огонь по своим`, "cfg:friendly")],
     [Markup.button.callback(`${flag(settings.roles.don)} Дон`, "cfg:role_don"), Markup.button.callback(`${flag(settings.roles.commissar)} Комиссар`, "cfg:role_commissar")],
     [Markup.button.callback(`${flag(settings.roles.doctor)} Доктор`, "cfg:role_doctor"), Markup.button.callback(`${flag(settings.roles.maniac)} Маньяк`, "cfg:role_maniac")],
-    [Markup.button.callback(`${flag(settings.roles.bum)} Бомж`, "cfg:role_bum")]
+    [Markup.button.callback(`${flag(settings.roles.bum)} Бомж`, "cfg:role_bum"), Markup.button.callback(`${flag(settings.roles.kamikaze)} Камикадзе`, "cfg:role_kamikaze")],
+    [Markup.button.callback(`${flag(settings.roles.sergeant)} Сержант`, "cfg:role_sergeant"), Markup.button.callback(`${flag(settings.roles.lawyer)} Адвокат`, "cfg:role_lawyer")],
+    [Markup.button.callback(`${flag(settings.roles.lucky)} Счастливчик`, "cfg:role_lucky"), Markup.button.callback(`${flag(settings.roles.suicide)} Самоубийца`, "cfg:role_suicide")],
+    [Markup.button.callback(`${flag(settings.roles.mistress)} Любовница`, "cfg:role_mistress")]
+  ]).reply_markup;
+}
+
+function profileKeyboard(): InlineKeyboardMarkup {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("🛒 Магазин", "profile:shop")],
+    [Markup.button.callback("💰 Купить 💵", "profile:buy_money"), Markup.button.callback("💎 Купить 💎", "profile:buy_gems")]
   ]).reply_markup;
 }
 
 function shopKeyboard(): InlineKeyboardMarkup {
-  return Markup.inlineKeyboard(
-    Object.entries(SHOP_ITEMS).map(([key, item]) =>
-      Markup.button.callback(`${item.title} — ${item.price}💵`, `shop:${key}`))
-      .map((button) => [button])
-  ).reply_markup;
+  return Markup.inlineKeyboard([
+    ...Object.entries(SHOP_ITEMS).map(([key, item]) =>
+      [Markup.button.callback(`${item.title} · ${priceLabel(item)}`, `shop:${key}`)]),
+    [Markup.button.callback("← Назад", "profile:back")]
+  ]).reply_markup;
 }
 
 function mutateSetting(settings: GameSettings, key: string): void {
@@ -1385,30 +1854,123 @@ function mutateSetting(settings: GameSettings, key: string): void {
       break;
     case "night": settings.nightSeconds = cycle(settings.nightSeconds); break;
     case "day": settings.daySeconds = cycle(settings.daySeconds); break;
-    case "nomtime": settings.nominationSeconds = cycle(settings.nominationSeconds); break;
     case "votetime": settings.voteSeconds = cycle(settings.voteSeconds); break;
     case "lastword": settings.lastWordSeconds = cycle(settings.lastWordSeconds, [0, 10, 15, 30, 45, 60]); break;
+    case "judge": settings.judgeSeconds = cycle(settings.judgeSeconds); break;
     case "afk": settings.afkLimit = cycle(settings.afkLimit, [0, 1, 2, 3]); break;
-    case "nominations": settings.nominationsEnabled = !settings.nominationsEnabled; break;
     case "reveal": settings.revealDeadRoles = !settings.revealDeadRoles; break;
     case "selfheal": settings.doctorSelfHeal = !settings.doctorSelfHeal; break;
     case "shoot": settings.commissionerCanShoot = !settings.commissionerCanShoot; break;
     case "selfvote": settings.allowSelfVote = !settings.allowSelfVote; break;
     case "skip": settings.allowSkipVote = !settings.allowSkipVote; break;
     case "autodelete": settings.autoDeleteMessages = !settings.autoDeleteMessages; break;
+    case "friendly": settings.friendlyFire = !settings.friendlyFire; break;
     case "role_don": settings.roles.don = !settings.roles.don; break;
     case "role_commissar": settings.roles.commissar = !settings.roles.commissar; break;
     case "role_doctor": settings.roles.doctor = !settings.roles.doctor; break;
     case "role_maniac": settings.roles.maniac = !settings.roles.maniac; break;
     case "role_bum": settings.roles.bum = !settings.roles.bum; break;
+    case "role_kamikaze": settings.roles.kamikaze = !settings.roles.kamikaze; break;
+    case "role_sergeant": settings.roles.sergeant = !settings.roles.sergeant; break;
+    case "role_lawyer": settings.roles.lawyer = !settings.roles.lawyer; break;
+    case "role_lucky": settings.roles.lucky = !settings.roles.lucky; break;
+    case "role_suicide": settings.roles.suicide = !settings.roles.suicide; break;
+    case "role_mistress": settings.roles.mistress = !settings.roles.mistress; break;
   }
 }
 
 function validSingleActionTarget(actions: ActionRow[], players: PlayerRow[], aliveIds: Set<string>, type: ActionType, role: Role): string | null {
   return actions.find((action) => {
     const actor = players.find((player) => player.user_id === action.actor_id);
-    return action.type === type && aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) && actor?.role === role;
+    return action.type === type && aliveIds.has(action.actor_id) && aliveIds.has(action.target_id) && effectiveNightRole(actor!, players) === role;
   })?.target_id ?? null;
+}
+
+function roleRevealTitle(role: Role): string {
+  const info = ROLES[role];
+  const title = role === "commissar" ? "Комиссар Каттани" : info.title;
+  return `${info.emoji} <b>${title}</b>`;
+}
+
+function effectiveNightRole(player: PlayerRow, players: PlayerRow[]): Role {
+  if (player.role === "commissar") return "commissar";
+  if (player.role === "sergeant") {
+    const commissarAlive = players.some((candidate) => candidate.role === "commissar" && candidate.alive === 1);
+    if (!commissarAlive) return "commissar";
+  }
+  return player.role ?? "citizen";
+}
+
+function isMafiaTeam(role: Role | null): boolean {
+  return role === "mafia" || role === "don" || role === "lawyer";
+}
+
+function canPerform(actor: PlayerRow | undefined, type: ActionType, players: PlayerRow[]): boolean {
+  if (!actor) return false;
+  return ACTION_ROLE[type].includes(effectiveNightRole(actor, players));
+}
+
+function computeNightDeaths(
+  effActions: ActionRow[],
+  players: PlayerRow[],
+  aliveIds: Set<string>,
+  shield: Map<string, number>
+): { deaths: Set<string>; savedCount: number; shieldBreaks: Set<string> } {
+  const doctorHealed = new Set<string>();
+  for (const action of effActions) {
+    if (action.type !== "doctor_heal") continue;
+    const doctor = players.find((player) => player.user_id === action.actor_id);
+    if (doctor?.role === "doctor" && doctor.alive === 1 && aliveIds.has(action.target_id)) {
+      doctorHealed.add(action.target_id);
+    }
+  }
+
+  const mafiaVotes = effActions.filter((action) => {
+    if (action.type !== "mafia_kill") return false;
+    const actor = players.find((player) => player.user_id === action.actor_id);
+    return !!actor && (actor.role === "mafia" || actor.role === "don") && actor.alive === 1;
+  });
+  const mafiaTarget = selectPluralityTarget(mafiaVotes.map((action) => action.target_id));
+  const maniacTarget = validSingleActionTarget(effActions, players, aliveIds, "maniac_kill", "maniac");
+  const commissionerTarget = validSingleActionTarget(effActions, players, aliveIds, "commissar_shoot", "commissar");
+
+  const attacked = new Set<string>();
+  if (mafiaTarget) attacked.add(mafiaTarget);
+  if (maniacTarget) attacked.add(maniacTarget);
+  if (commissionerTarget) attacked.add(commissionerTarget);
+
+  const deaths = new Set<string>();
+  const shieldBreaks = new Set<string>();
+  let savedCount = 0;
+  for (const id of attacked) {
+    if (doctorHealed.has(id)) {
+      savedCount += 1;
+      continue;
+    }
+    const target = players.find((player) => player.user_id === id);
+    if (target && (shield.get(id) ?? 0) > 0) {
+      shieldBreaks.add(id);
+      continue;
+    }
+    deaths.add(id);
+  }
+  return { deaths, savedCount, shieldBreaks };
+}
+
+function nightBlockedUsers(actions: ActionRow[], players: PlayerRow[]): Set<string> {
+  const blocked = new Set<string>();
+  for (const action of actions) {
+    if (action.type !== "mistress_visit") continue;
+    const mistress = players.find((player) => player.user_id === action.actor_id);
+    if (mistress && mistress.alive === 1) blocked.add(action.target_id);
+  }
+  return blocked;
+}
+
+function sameSets(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) if (!b.has(value)) return false;
+  return true;
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -1439,22 +2001,62 @@ function plainPlayerName(player: Pick<PlayerRow, "username" | "first_name">): st
   return value.length > 28 ? `${value.slice(0, 27)}…` : value;
 }
 
+function groupEndGamePlayers(players: PlayerRow[], winner: Winner): { winners: PlayerRow[]; others: PlayerRow[] } {
+  const winners: PlayerRow[] = [];
+  const others: PlayerRow[] = [];
+  for (const player of players) {
+    const role = player.role;
+    const side = role ? ROLES[role].side : null;
+    let onWinningSide = false;
+    switch (winner) {
+      case "town": onWinningSide = player.alive === 1 && side === "town"; break;
+      case "mafia": onWinningSide = player.alive === 1 && (role === "mafia" || role === "don" || role === "lawyer"); break;
+      case "maniac": onWinningSide = player.alive === 1 && role === "maniac"; break;
+      case "mistress": onWinningSide = player.alive === 1 && role === "mistress"; break;
+      case "suicide": onWinningSide = role === "suicide"; break;
+    }
+    (onWinningSide ? winners : others).push(player);
+  }
+  return { winners, others };
+}
+
+function durationText(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes} мин. ${seconds} сек.`;
+}
+
 function isPlayer(player: PlayerRow | undefined): player is PlayerRow {
   return player !== undefined;
 }
 
+function eliminationDeathLine(player: PlayerRow, revealRole: boolean): string {
+  const was = revealRole && player.role ? ` Он был ${roleLabel(player.role)}.` : "";
+  return `${mention(player)} не выдержал гнетущей атмосферы этого города и повесился.${was}`;
+}
+
+function judgeKeyboard(gameId: number, day: number, counts: { yes: number; no: number }): InlineKeyboardMarkup {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback(`👍 ${counts.yes}`, `judge:${gameId}:${day}:yes`)],
+    [Markup.button.callback(`👎 ${counts.no}`, `judge:${gameId}:${day}:no`)]
+  ]).reply_markup;
+}
+
 function isActivePhase(phase: GameRow["phase"]): phase is ActivePhase {
-  return ["night", "day", "nomination", "vote", "last_word"].includes(phase);
+  return ["night", "day", "vote", "last_word", "judgment"].includes(phase);
 }
 
 function privateHtml(): { parse_mode: "HTML"; protect_content: true } {
   return { parse_mode: "HTML", protect_content: true };
 }
 
-function repliedUser(ctx: Context): { id: number } | undefined {
+function repliedUser(ctx: Context): { id: number; username?: string; first_name: string } | undefined {
   const message = ctx.message;
   if (!message || !("reply_to_message" in message)) return undefined;
-  return message.reply_to_message?.from;
+  const from = message.reply_to_message?.from;
+  if (!from) return undefined;
+  return { id: from.id, username: from.username ?? undefined, first_name: from.first_name };
 }
 
 async function safeAnswerCallback(ctx: Context, text?: string, showAlert = false): Promise<void> {
@@ -1467,9 +2069,9 @@ function phaseName(phase: GameRow["phase"]): string {
     case "lobby": return "набор";
     case "night": return "ночь";
     case "day": return "обсуждение";
-    case "nomination": return "выдвижение";
     case "vote": return "голосование";
     case "last_word": return "последнее слово";
+    case "judgment": return "суд Линча";
     case "paused": return "пауза";
     case "finished": return "игра окончена";
   }
