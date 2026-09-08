@@ -32,13 +32,15 @@ export function roleDescription(role: Role): string {
 }
 
 export function lobbyText(brandName: string, game: GameRow, players: PlayerRow[]): string {
+  // Каждое имя — кликабельная ссылка на профиль: <a href="tg://user?id=USER_ID">Имя</a>.
+  // Отправлять/редактировать этот текст нужно только с parse_mode: "HTML".
   const names = players.length
-    ? players.map((player) => mention(player)).join(", ")
+    ? players.map((player, index) => `${index + 1}. ${mention(player)}`).join("\n")
     : "Пока никого нет";
   return [
     "<b>Ведётся набор в игру</b>",
     "",
-    "Зарегистрировались::",
+    "Зарегистрировались:",
     "",
     names,
     "",
