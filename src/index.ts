@@ -30,7 +30,7 @@ async function main(): Promise<void> {
     }
     await ctx.reply([
       `🎭 <b>${escapeHtml(config.brandName)}</b>`,
-      "Я провожу игру в Мафию: раздаю тайные роли, принимаю ночные действия, веду кандидатуры и голосование.",
+      "Я провожу игру в Мафию: раздаю тайные роли, принимаю ночные действия и веду голосование.",
       "",
       "1. Добавьте меня в группу.",
       "2. Отправьте /newgame.",
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     await ctx.reply([
       "📖 <b>Правила Mafia Noir</b>",
       "",
-      "Ночью активные роли выбирают цели в личном чате. Днём город обсуждает события, выдвигает кандидатов и голосует.",
+      "Ночью активные роли выбирают цели в личном чате. Днём город обсуждает события и голосует.",
       "",
       "🔪 <b>Мафия</b> и 🤵 <b>Дон</b> выбирают общую жертву. При ничьей выстрела нет.",
       "🤵 <b>Дон</b> ищет Комиссара.",
@@ -159,8 +159,6 @@ async function main(): Promise<void> {
   bot.action(/^profile:buy_money$/, (ctx) => engine.handleBuyCurrency(ctx, "money"));
   bot.action(/^profile:buy_gems$/, (ctx) => engine.handleBuyCurrency(ctx, "gems"));
   bot.action(/^shop:(documents|protection|active_role)$/, (ctx) => engine.handleShopPurchase(ctx, ctx.match[1] as ShopItem));
-  bot.action(/^nom:(\d+):(\d+):(-?\d+)$/,
-    (ctx) => engine.handleNomination(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
   bot.action(/^vote:(\d+):(\d+):(skip|-?\d+)$/,
     (ctx) => engine.handleVote(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
   bot.action(/^judge:(\d+):(\d+):(yes|no)$/,
@@ -185,7 +183,7 @@ async function main(): Promise<void> {
     }
   });
 
-  await bot.telegram.setMyDescription("Mafia Noir проводит полноценную игру в группах: тайные роли, ночные действия, кандидатуры, голосование, AFK-контроль и статистика.", "ru");
+  await bot.telegram.setMyDescription("Mafia Noir проводит полноценную игру в группах: тайные роли, ночные действия, голосование, AFK-контроль и статистика.", "ru");
   await bot.telegram.setMyShortDescription("Кинематографичная Мафия для групповых чатов.", "ru");
   await bot.telegram.setMyCommands([
     { command: "newgame", description: "Открыть набор" },

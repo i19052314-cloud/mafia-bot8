@@ -22,7 +22,7 @@ export function roleLabel(role: Role): string {
 
 export function roleDescription(role: Role): string {
   switch (role) {
-    case "citizen": return "Днём выдвигайте кандидатов, вычисляйте преступников и голосуйте. Ночью вы спите.";
+    case "citizen": return "Днём обсуждайте события, вычисляйте преступников и голосуйте. Ночью вы спите.";
     case "mafia": return "Ночью вместе с мафией выберите жертву. Для тайной связи используйте /mafia текст.";
     case "don": return "Вы глава мафии: участвуете в убийстве и можете искать Комиссара.";
     case "commissar": return "Главный городской защитник и гроза мафии. Каждую ночь проверяйте одного игрока на связь с мафией, а при включённой стрельбе можете вместо проверки сделать выстрел.";
@@ -39,14 +39,16 @@ export function roleDescription(role: Role): string {
 }
 
 export function lobbyText(brandName: string, game: GameRow, players: PlayerRow[]): string {
-  const names = players.map((player) => player.username ? escapeHtml(player.username) : escapeHtml(player.first_name)).join(", ");
+  // Каждое имя — кликабельная ссылка на профиль: <a href="tg://user?id=USER_ID">Имя</a>.
+  // Отправлять/редактировать этот текст нужно только с parse_mode: "HTML".
+  const names = players.map((player, index) => `${index + 1}. ${mention(player)}`).join("\n");
   const chatTitle = game.chat_title ? ` ${escapeHtml(game.chat_title)}` : "";
   return [
     `<b>${escapeHtml(brandName)}</b>${chatTitle}`,
     "<b>Ведётся набор в игру</b>",
     "",
     "<b>Зарегистрировались:</b>",
-    names ? `${names}.` : "Пока никого нет.",
+    names ? names : "Пока никого нет.",
     "",
     `Итого <b>${players.length}</b> чел.`
   ].join("\n");
@@ -138,10 +140,9 @@ export function settingsText(settings: GameSettings): string {
     "⚙️ <b>Настройки игры</b>",
     "",
     `<b>Игроки:</b> ${settings.minPlayers}–${settings.maxPlayers}`,
-    `<b>Таймеры:</b> ночь ${settings.nightSeconds}с · день ${settings.daySeconds}с · кандидатуры ${settings.nominationSeconds}с · голосование ${settings.voteSeconds}с · последнее слово ${settings.lastWordSeconds}с · суд ${settings.judgeSeconds}с`,
+    `<b>Таймеры:</b> ночь ${settings.nightSeconds}с · день ${settings.daySeconds}с · голосование ${settings.voteSeconds}с · последнее слово ${settings.lastWordSeconds}с · суд ${settings.judgeSeconds}с`,
     `<b>Роли:</b> ${enabledRoles || "только Мафия и Мирные"}`,
     "",
-    `${flag(settings.nominationsEnabled)} Кандидатуры перед голосованием`,
     `${flag(settings.revealDeadRoles)} Раскрывать роли выбывших`,
     `${flag(settings.doctorSelfHeal)} Доктор может лечить себя`,
     `${flag(settings.commissionerCanShoot)} Комиссар может стрелять`,
