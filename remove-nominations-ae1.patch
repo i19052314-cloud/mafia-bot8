@@ -1,0 +1,385 @@
+Base commit: 42de729 (arena/01a07ae1-mafia-bot8)
+Subject: remove nomination phase completely; day goes straight to voting
+
+diff -ruN a/.env.example b/.env.example
+--- a/.env.example	2026-09-08 07:59:10.470227989 +0000
++++ b/.env.example	2026-09-08 07:59:10.474228009 +0000
+@@ -19,7 +19,6 @@
+ MAX_PLAYERS=30
+ NIGHT_SECONDS=45
+ DAY_SECONDS=60
+-NOMINATION_SECONDS=30
+ VOTE_SECONDS=30
+ LAST_WORD_SECONDS=15
+ JUDGE_SECONDS=30
+@@ -29,7 +28,6 @@
+ COMMISSIONER_CAN_SHOOT=false
+ ALLOW_SELF_VOTE=false
+ ALLOW_SKIP_VOTE=true
+-NOMINATIONS_ENABLED=true
+ AFK_LIMIT=2
+ AUTO_DELETE_MESSAGES=false
+ FRIENDLY_FIRE=false
+diff -ruN a/src/config.ts b/src/config.ts
+--- a/src/config.ts	2026-09-08 07:59:10.470227989 +0000
++++ b/src/config.ts	2026-09-08 07:59:10.470227989 +0000
+@@ -25,7 +25,6 @@
+     maxPlayers: integer("MAX_PLAYERS", 30, minPlayers, 50),
+     nightSeconds: integer("NIGHT_SECONDS", 45, 10, 3600),
+     daySeconds: integer("DAY_SECONDS", 60, 10, 3600),
+-    nominationSeconds: integer("NOMINATION_SECONDS", 30, 10, 600),
+     voteSeconds: integer("VOTE_SECONDS", 30, 10, 600),
+     lastWordSeconds: integer("LAST_WORD_SECONDS", 15, 0, 300),
+     judgeSeconds: integer("JUDGE_SECONDS", 30, 10, 600),
+@@ -34,7 +33,6 @@
+     commissionerCanShoot: boolean("COMMISSIONER_CAN_SHOOT", false),
+     allowSelfVote: boolean("ALLOW_SELF_VOTE", false),
+     allowSkipVote: boolean("ALLOW_SKIP_VOTE", true),
+-    nominationsEnabled: boolean("NOMINATIONS_ENABLED", true),
+     afkLimit: integer("AFK_LIMIT", 2, 0, 10),
+     autoDeleteMessages: boolean("AUTO_DELETE_MESSAGES", false),
+     friendlyFire: boolean("FRIENDLY_FIRE", false),
+diff -ruN a/src/database.ts b/src/database.ts
+--- a/src/database.ts	2026-09-08 07:59:10.470227989 +0000
++++ b/src/database.ts	2026-09-08 07:59:10.470227989 +0000
+@@ -8,7 +8,6 @@
+   Currency,
+   GameRow,
+   GameSettings,
+-  NominationRow,
+   Phase,
+   PlayerRow,
+   Role,
+@@ -58,10 +57,10 @@
+         chat_title TEXT NOT NULL DEFAULT '',
+         host_id TEXT NOT NULL,
+         status TEXT NOT NULL CHECK (status IN ('lobby','running','finished','cancelled')),
+-        phase TEXT NOT NULL CHECK (phase IN ('lobby','night','day','nomination','vote','last_word','judgment','paused','finished')),
++        phase TEXT NOT NULL CHECK (phase IN ('lobby','night','day','vote','last_word','judgment','paused','finished')),
+         day INTEGER NOT NULL DEFAULT 0,
+         phase_ends_at DOUBLE PRECISION,
+-        paused_phase TEXT CHECK (paused_phase IS NULL OR paused_phase IN ('night','day','nomination','vote','last_word','judgment')),
++        paused_phase TEXT CHECK (paused_phase IS NULL OR paused_phase IN ('night','day','vote','last_word','judgment')),
+         paused_remaining_ms DOUBLE PRECISION,
+         pending_elimination_id TEXT,
+         lobby_message_id INTEGER,
+@@ -111,14 +110,8 @@
+         PRIMARY KEY (game_id, day, voter_id)
+       );
+ 
+-      CREATE TABLE IF NOT EXISTS nominations (
+-        game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+-        day INTEGER NOT NULL,
+-        nominator_id TEXT NOT NULL,
+-        target_id TEXT NOT NULL,
+-        created_at DOUBLE PRECISION NOT NULL,
+-        PRIMARY KEY (game_id, day, nominator_id)
+-      );
++      -- Фаза выдвижения удалена: таблица nominations больше не используется.
++      DROP TABLE IF EXISTS nominations;
+ 
+       CREATE TABLE IF NOT EXISTS game_messages (
+         game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+@@ -391,19 +384,6 @@
+     await this.pool.query("UPDATE game_players SET afk_strikes = $1 WHERE game_id = $2 AND user_id = $3", [strikes, gameId, userId]);
+   }
+ 
+-  async recordNomination(gameId: number, day: number, nominatorId: string, targetId: string): Promise<void> {
+-    await this.pool.query(`
+-      INSERT INTO nominations (game_id, day, nominator_id, target_id, created_at)
+-      VALUES ($1, $2, $3, $4, $5)
+-      ON CONFLICT(game_id, day, nominator_id) DO UPDATE SET target_id = EXCLUDED.target_id, created_at = EXCLUDED.created_at
+-    `, [gameId, day, nominatorId, targetId, Date.now()]);
+-  }
+-
+-  async getNominations(gameId: number, day: number): Promise<NominationRow[]> {
+-    const result = await this.pool.query("SELECT * FROM nominations WHERE game_id = $1 AND day = $2", [gameId, day]);
+-    return result.rows as NominationRow[];
+-  }
+-
+   async recordVote(gameId: number, day: number, voterId: string, targetId: string): Promise<void> {
+     await this.pool.query(`
+       INSERT INTO votes (game_id, day, voter_id, target_id, created_at)
+@@ -618,8 +598,6 @@
+       await client.query("UPDATE actions SET target_id = $1 WHERE target_id = $2", [anonymousId, userId]);
+       await client.query("UPDATE votes SET voter_id = $1 WHERE voter_id = $2", [anonymousId, userId]);
+       await client.query("UPDATE votes SET target_id = $1 WHERE target_id = $2", [anonymousId, userId]);
+-      await client.query("UPDATE nominations SET nominator_id = $1 WHERE nominator_id = $2", [anonymousId, userId]);
+-      await client.query("UPDATE nominations SET target_id = $1 WHERE target_id = $2", [anonymousId, userId]);
+       await client.query(`
+         UPDATE game_players SET user_id = $1, username = NULL, first_name = 'Удалённый пользователь'
+         WHERE user_id = $2
+diff -ruN a/src/game-engine.ts b/src/game-engine.ts
+--- a/src/game-engine.ts	2026-09-08 07:59:10.470227989 +0000
++++ b/src/game-engine.ts	2026-09-08 07:59:10.470227989 +0000
+@@ -429,38 +429,6 @@
+     });
+   }
+ 
+-  async handleNomination(ctx: Context, gameId: number, day: number, targetId: string): Promise<void> {
+-    if (!ctx.from || ctx.chat?.type !== "private") {
+-      await safeAnswerCallback(ctx, "Выдвижение доступно только в личном чате с ботом", true);
+-      return;
+-    }
+-    const game = await this.db.getGame(gameId);
+-    if (!game || game.phase !== "nomination" || game.day !== day || game.status !== "running") {
+-      await safeAnswerCallback(ctx, "Выдвижение уже завершено", true);
+-      return;
+-    }
+-    const nominator = await this.db.getPlayer(game.id, String(ctx.from.id));
+-    const target = await this.db.getPlayer(game.id, targetId);
+-    if (!nominator?.alive || !target?.alive) {
+-      await safeAnswerCallback(ctx, "Действие доступно только живым игрокам", true);
+-      return;
+-    }
+-    if (nominator.user_id === target.user_id) {
+-      await safeAnswerCallback(ctx, "Нельзя выдвинуть себя", true);
+-      return;
+-    }
+-    const previous = (await this.db.getNominations(game.id, game.day)).find((item) => item.nominator_id === nominator.user_id);
+-    if (previous?.target_id === target.user_id) {
+-      await safeAnswerCallback(ctx, "Вы уже выдвинули этого игрока");
+-      return;
+-    }
+-    await this.db.recordNomination(game.id, game.day, nominator.user_id, target.user_id);
+-    await safeAnswerCallback(ctx, "Кандидатура принята");
+-    await this.sendTracked(game, previous
+-      ? `${mention(nominator)} изменил(а) кандидатуру: ${mention(target)}`
+-      : `${mention(nominator)} выдвинул(а) ${mention(target)}`);
+-  }
+-
+   async handleVote(ctx: Context, gameId: number, voteDay: number, targetId: string): Promise<void> {
+     if (!ctx.from || ctx.chat?.type !== "private") {
+       await safeAnswerCallback(ctx, "Голосование доступно только в личном чате с ботом", true);
+@@ -1230,10 +1198,9 @@
+       return;
+     }
+     if (game.phase === "night") await this.resolveNight(game);
+-    else if (game.phase === "day") {
+-      if (game.settings.nominationsEnabled) await this.openNominations(game);
+-      else await this.openVoting(game, await this.db.getPlayers(game.id, true));
+-    } else if (game.phase === "nomination") await this.openVotingFromNominations(game);
++    else if (game.phase === "day") await this.openVoting(game, await this.db.getPlayers(game.id, true));
++    // Legacy-миграция: игры, оставшиеся в удалённой фазе «выдвижение», сразу переходят к голосованию.
++    else if ((game.phase as string) === "nomination") await this.openVoting(game, await this.db.getPlayers(game.id, true));
+     else if (game.phase === "vote") await this.resolveVoting(game);
+     else if (game.phase === "last_word") await this.finalizeLastWord(game);
+     else if (game.phase === "judgment") await this.resolveJudgment(game);
+@@ -1417,56 +1384,6 @@
+     return voters[randomInt(voters.length)]!;
+   }
+ 
+-  private async openNominations(game: GameRow): Promise<void> {
+-    const current = await this.db.getGame(game.id);
+-    if (!current || current.phase !== "day") return;
+-    const alive = await this.db.getPlayers(game.id, true);
+-    const endsAt = Date.now() + game.settings.nominationSeconds * 1000;
+-    await this.db.setPhase(game.id, "nomination", game.day, endsAt);
+-    const updated = (await this.db.getGame(game.id))!;
+-    await this.cleanupPhaseMessages(updated);
+-    await this.sendTracked(updated, [
+-      "📣 <b>Выдвижение кандидатур</b>",
+-      `У вас <b>${game.settings.nominationSeconds} сек.</b>`,
+-      "Каждый живой игрок выдвигает кандидата в личных сообщениях с ботом."
+-    ].join("\n"), this.openBotKeyboard());
+-    await this.sendNominationPrompts(updated, alive);
+-    this.schedulePhase(game.id, endsAt);
+-  }
+-
+-  private async sendNominationPrompts(game: GameRow, alive: PlayerRow[]): Promise<void> {
+-    for (const player of alive) {
+-      try {
+-        await this.bot.telegram.sendMessage(player.user_id, [
+-          "📣 <b>Пришло время выдвигать кандидатов!</b>",
+-          "Кого вы хотите выдвинуть на голосование?"
+-        ].join("\n"), {
+-          ...privateHtml(),
+-          reply_markup: nominationKeyboard(game.id, game.day, alive)
+-        });
+-      } catch (error) {
+-        this.logger.warn(`Не удалось отправить выдвижение игроку ${player.user_id}`, error);
+-      }
+-    }
+-  }
+-
+-  private async openVotingFromNominations(game: GameRow): Promise<void> {
+-    const current = await this.db.getGame(game.id);
+-    if (!current || current.phase !== "nomination") return;
+-    const alive = await this.db.getPlayers(game.id, true);
+-    const aliveIds = new Set(alive.map((player) => player.user_id));
+-    const nominations = await this.db.getNominations(game.id, game.day);
+-    const candidateIds = [...new Set(nominations.map((item) => item.target_id))].filter((id) => aliveIds.has(id));
+-    const candidates = candidateIds.map((id) => alive.find((player) => player.user_id === id)).filter(isPlayer);
+-    if (!candidates.length) {
+-      await this.cleanupPhaseMessages(game);
+-      await this.sendTracked(game, "Кандидатов нет. Город переходит к ночи.");
+-      await this.startNextNight(game.id, game.day + 1);
+-      return;
+-    }
+-    await this.openVoting(game, candidates);
+-  }
+-
+   private async openVoting(game: GameRow, candidates: PlayerRow[]): Promise<void> {
+     const alive = await this.db.getPlayers(game.id, true);
+     const endsAt = Date.now() + game.settings.voteSeconds * 1000;
+@@ -1836,11 +1753,6 @@
+   return Markup.inlineKeyboard(chunk(buttons, 2)).reply_markup;
+ }
+ 
+-function nominationKeyboard(gameId: number, day: number, players: PlayerRow[]): InlineKeyboardMarkup {
+-  const buttons = players.map((player) => Markup.button.callback(plainPlayerName(player), `nom:${gameId}:${day}:${player.user_id}`));
+-  return Markup.inlineKeyboard(chunk(buttons, 2)).reply_markup;
+-}
+-
+ function voteKeyboard(gameId: number, day: number, players: PlayerRow[], allowSkip: boolean, counts: Map<string, number>): InlineKeyboardMarkup {
+   const buttons = players.map((player) => {
+     const count = counts.get(player.user_id) ?? 0;
+@@ -1859,10 +1771,9 @@
+   return Markup.inlineKeyboard([
+     [Markup.button.callback(`👥 Мин. ${settings.minPlayers}`, "cfg:minplayers"), Markup.button.callback(`👥 Макс. ${settings.maxPlayers}`, "cfg:maxplayers")],
+     [Markup.button.callback(`🌙 Ночь ${settings.nightSeconds}с`, "cfg:night"), Markup.button.callback(`☀️ День ${settings.daySeconds}с`, "cfg:day")],
+-    [Markup.button.callback(`📣 Кандидаты ${settings.nominationSeconds}с`, "cfg:nomtime"), Markup.button.callback(`⚖️ Голос ${settings.voteSeconds}с`, "cfg:votetime")],
++    [Markup.button.callback(`⚖️ Голос ${settings.voteSeconds}с`, "cfg:votetime"), Markup.button.callback(`⚖️ Суд ${settings.judgeSeconds}с`, "cfg:judge")],
+     [Markup.button.callback(`🎙 Слово ${settings.lastWordSeconds}с`, "cfg:lastword"), Markup.button.callback(`💤 AFK ${settings.afkLimit || "выкл"}`, "cfg:afk")],
+-    [Markup.button.callback(`⚖️ Суд ${settings.judgeSeconds}с`, "cfg:judge")],
+-    [Markup.button.callback(`${flag(settings.nominationsEnabled)} Кандидатуры`, "cfg:nominations"), Markup.button.callback(`${flag(settings.revealDeadRoles)} Роли`, "cfg:reveal")],
++    [Markup.button.callback(`${flag(settings.revealDeadRoles)} Роли`, "cfg:reveal")],
+     [Markup.button.callback(`${flag(settings.doctorSelfHeal)} Самолечение`, "cfg:selfheal"), Markup.button.callback(`${flag(settings.commissionerCanShoot)} Выстрел`, "cfg:shoot")],
+     [Markup.button.callback(`${flag(settings.allowSelfVote)} За себя`, "cfg:selfvote"), Markup.button.callback(`${flag(settings.allowSkipVote)} Пропуск`, "cfg:skip")],
+     [Markup.button.callback(`${flag(settings.autoDeleteMessages)} Автоудаление`, "cfg:autodelete"), Markup.button.callback(`${flag(settings.friendlyFire)} Огонь по своим`, "cfg:friendly")],
+@@ -1903,12 +1814,10 @@
+       break;
+     case "night": settings.nightSeconds = cycle(settings.nightSeconds); break;
+     case "day": settings.daySeconds = cycle(settings.daySeconds); break;
+-    case "nomtime": settings.nominationSeconds = cycle(settings.nominationSeconds); break;
+     case "votetime": settings.voteSeconds = cycle(settings.voteSeconds); break;
+     case "lastword": settings.lastWordSeconds = cycle(settings.lastWordSeconds, [0, 10, 15, 30, 45, 60]); break;
+     case "judge": settings.judgeSeconds = cycle(settings.judgeSeconds); break;
+     case "afk": settings.afkLimit = cycle(settings.afkLimit, [0, 1, 2, 3]); break;
+-    case "nominations": settings.nominationsEnabled = !settings.nominationsEnabled; break;
+     case "reveal": settings.revealDeadRoles = !settings.revealDeadRoles; break;
+     case "selfheal": settings.doctorSelfHeal = !settings.doctorSelfHeal; break;
+     case "shoot": settings.commissionerCanShoot = !settings.commissionerCanShoot; break;
+@@ -2095,7 +2004,7 @@
+ }
+ 
+ function isActivePhase(phase: GameRow["phase"]): phase is ActivePhase {
+-  return ["night", "day", "nomination", "vote", "last_word", "judgment"].includes(phase);
++  return ["night", "day", "vote", "last_word", "judgment"].includes(phase);
+ }
+ 
+ function privateHtml(): { parse_mode: "HTML"; protect_content: true } {
+@@ -2120,7 +2029,6 @@
+     case "lobby": return "набор";
+     case "night": return "ночь";
+     case "day": return "обсуждение";
+-    case "nomination": return "выдвижение";
+     case "vote": return "голосование";
+     case "last_word": return "последнее слово";
+     case "judgment": return "суд Линча";
+diff -ruN a/src/index.ts b/src/index.ts
+--- a/src/index.ts	2026-09-08 07:59:10.470227989 +0000
++++ b/src/index.ts	2026-09-08 07:59:10.470227989 +0000
+@@ -30,7 +30,7 @@
+     }
+     await ctx.reply([
+       `🎭 <b>${escapeHtml(config.brandName)}</b>`,
+-      "Я провожу игру в Мафию: раздаю тайные роли, принимаю ночные действия, веду кандидатуры и голосование.",
++      "Я провожу игру в Мафию: раздаю тайные роли, принимаю ночные действия и веду голосование.",
+       "",
+       "1. Добавьте меня в группу.",
+       "2. Отправьте /newgame.",
+@@ -90,7 +90,7 @@
+     await ctx.reply([
+       "📖 <b>Правила Mafia Noir</b>",
+       "",
+-      "Ночью активные роли выбирают цели в личном чате. Днём город обсуждает события, выдвигает кандидатов и голосует.",
++      "Ночью активные роли выбирают цели в личном чате. Днём город обсуждает события и голосует.",
+       "",
+       "🔪 <b>Мафия</b> и 🤵 <b>Дон</b> выбирают общую жертву. При ничьей выстрела нет.",
+       "🤵 <b>Дон</b> ищет Комиссара.",
+@@ -159,8 +159,6 @@
+   bot.action(/^profile:buy_money$/, (ctx) => engine.handleBuyCurrency(ctx, "money"));
+   bot.action(/^profile:buy_gems$/, (ctx) => engine.handleBuyCurrency(ctx, "gems"));
+   bot.action(/^shop:(documents|protection|active_role)$/, (ctx) => engine.handleShopPurchase(ctx, ctx.match[1] as ShopItem));
+-  bot.action(/^nom:(\d+):(\d+):(-?\d+)$/,
+-    (ctx) => engine.handleNomination(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
+   bot.action(/^vote:(\d+):(\d+):(skip|-?\d+)$/,
+     (ctx) => engine.handleVote(ctx, Number(ctx.match[1]), Number(ctx.match[2]), ctx.match[3]!));
+   bot.action(/^judge:(\d+):(\d+):(yes|no)$/,
+@@ -185,7 +183,7 @@
+     }
+   });
+ 
+-  await bot.telegram.setMyDescription("Mafia Noir проводит полноценную игру в группах: тайные роли, ночные действия, кандидатуры, голосование, AFK-контроль и статистика.", "ru");
++  await bot.telegram.setMyDescription("Mafia Noir проводит полноценную игру в группах: тайные роли, ночные действия, голосование, AFK-контроль и статистика.", "ru");
+   await bot.telegram.setMyShortDescription("Кинематографичная Мафия для групповых чатов.", "ru");
+   await bot.telegram.setMyCommands([
+     { command: "newgame", description: "Открыть набор" },
+diff -ruN a/src/text.ts b/src/text.ts
+--- a/src/text.ts	2026-09-08 07:59:10.470227989 +0000
++++ b/src/text.ts	2026-09-08 07:59:10.470227989 +0000
+@@ -22,7 +22,7 @@
+ 
+ export function roleDescription(role: Role): string {
+   switch (role) {
+-    case "citizen": return "Днём выдвигайте кандидатов, вычисляйте преступников и голосуйте. Ночью вы спите.";
++    case "citizen": return "Днём обсуждайте события, вычисляйте преступников и голосуйте. Ночью вы спите.";
+     case "mafia": return "Ночью вместе с мафией выберите жертву. Для тайной связи используйте /mafia текст.";
+     case "don": return "Вы глава мафии: участвуете в убийстве и можете искать Комиссара.";
+     case "commissar": return "Главный городской защитник и гроза мафии. Каждую ночь проверяйте одного игрока на связь с мафией, а при включённой стрельбе можете вместо проверки сделать выстрел.";
+@@ -137,10 +137,9 @@
+     "⚙️ <b>Настройки игры</b>",
+     "",
+     `<b>Игроки:</b> ${settings.minPlayers}–${settings.maxPlayers}`,
+-    `<b>Таймеры:</b> ночь ${settings.nightSeconds}с · день ${settings.daySeconds}с · кандидатуры ${settings.nominationSeconds}с · голосование ${settings.voteSeconds}с · последнее слово ${settings.lastWordSeconds}с · суд ${settings.judgeSeconds}с`,
++    `<b>Таймеры:</b> ночь ${settings.nightSeconds}с · день ${settings.daySeconds}с · голосование ${settings.voteSeconds}с · последнее слово ${settings.lastWordSeconds}с · суд ${settings.judgeSeconds}с`,
+     `<b>Роли:</b> ${enabledRoles || "только Мафия и Мирные"}`,
+     "",
+-    `${flag(settings.nominationsEnabled)} Кандидатуры перед голосованием`,
+     `${flag(settings.revealDeadRoles)} Раскрывать роли выбывших`,
+     `${flag(settings.doctorSelfHeal)} Доктор может лечить себя`,
+     `${flag(settings.commissionerCanShoot)} Комиссар может стрелять`,
+diff -ruN a/src/types.ts b/src/types.ts
+--- a/src/types.ts	2026-09-08 07:59:10.470227989 +0000
++++ b/src/types.ts	2026-09-08 07:59:10.470227989 +0000
+@@ -17,7 +17,7 @@
+ export type Role = keyof typeof ROLES;
+ export type Side = (typeof ROLES)[Role]["side"];
+ export type GameStatus = "lobby" | "running" | "finished" | "cancelled";
+-export type ActivePhase = "night" | "day" | "nomination" | "vote" | "last_word" | "judgment";
++export type ActivePhase = "night" | "day" | "vote" | "last_word" | "judgment";
+ export type Phase = "lobby" | ActivePhase | "paused" | "finished";
+ export type ActionType =
+   | "mafia_kill"
+@@ -50,7 +50,6 @@
+   maxPlayers: number;
+   nightSeconds: number;
+   daySeconds: number;
+-  nominationSeconds: number;
+   voteSeconds: number;
+   lastWordSeconds: number;
+   judgeSeconds: number;
+@@ -59,7 +58,6 @@
+   commissionerCanShoot: boolean;
+   allowSelfVote: boolean;
+   allowSkipVote: boolean;
+-  nominationsEnabled: boolean;
+   afkLimit: number;
+   autoDeleteMessages: boolean;
+   friendlyFire: boolean;
+@@ -114,14 +112,6 @@
+   target_id: string;
+   created_at: number;
+ }
+-
+-export interface NominationRow {
+-  game_id: number;
+-  day: number;
+-  nominator_id: string;
+-  target_id: string;
+-  created_at: number;
+-}
+ 
+ export interface UserStats {
+   games: number;
