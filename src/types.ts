@@ -1,16 +1,16 @@
 export const ROLES = {
-  citizen: { title: "Мирный житель", emoji: "👨", side: "town" },
-  mafia: { title: "Мафия", emoji: "🔪", side: "mafia" },
-  don: { title: "Дон", emoji: "🤵", side: "mafia" },
-  commissar: { title: "Комиссар", emoji: "👮", side: "town" },
-  doctor: { title: "Доктор", emoji: "👨‍⚕️", side: "town" },
+  citizen: { title: "Мирный житель", emoji: "👨🏼", side: "town" },
+  mafia: { title: "Мафия", emoji: "🤵🏼", side: "mafia" },
+  don: { title: "Дон", emoji: "🤵🏻", side: "mafia" },
+  commissar: { title: "Комиссар Каттани", emoji: "🕵️", side: "town" },
+  doctor: { title: "Доктор", emoji: "👨🏼‍⚕️", side: "town" },
   maniac: { title: "Маньяк", emoji: "🪓", side: "neutral" },
-  bum: { title: "Бомж", emoji: "🧔", side: "town" },
+  bum: { title: "Бомж", emoji: "🧙🏼‍♂️", side: "town" },
   kamikaze: { title: "Камикадзе", emoji: "💣", side: "town" },
-  sergeant: { title: "Сержант", emoji: "🎖️", side: "town" },
+  sergeant: { title: "Сержант", emoji: "👮🏼‍♂️", side: "town" },
   lawyer: { title: "Адвокат", emoji: "🎩", side: "mafia" },
-  lucky: { title: "Счастливчик", emoji: "🍀", side: "town" },
-  suicide: { title: "Самоубийца", emoji: "💀", side: "neutral" },
+  lucky: { title: "Счастливчик", emoji: "🤞", side: "town" },
+  suicide: { title: "Самоубийца", emoji: "🤦🏼‍♂️", side: "neutral" },
   mistress: { title: "Любовница", emoji: "💋", side: "neutral" }
 } as const;
 

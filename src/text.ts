@@ -58,15 +58,16 @@ const ROLE_LIST_ORDER: Role[] = [
 ];
 
 function roleListTitle(role: Role): string {
-  return role === "commissar" ? "Комиссар Каттани" : ROLES[role].title;
+  return ROLES[role].title;
 }
 
-export function alivePlayersText(players: PlayerRow[], settings?: GameSettings): string {
+export function alivePlayersText(players: PlayerRow[], settings?: GameSettings, showTotal = true): string {
   const list = players.map((player, index) =>
     `${index + 1}. ${player.username ? escapeHtml(player.username) : escapeHtml(player.first_name)}`
   ).join("\n");
   const lines: string[] = [
     "<b>Живые игроки:</b>",
+    "",
     list
   ];
 
@@ -75,7 +76,7 @@ export function alivePlayersText(players: PlayerRow[], settings?: GameSettings):
     for (const player of players) {
       if (player.role) roleCounts.set(player.role, (roleCounts.get(player.role) ?? 0) + 1);
     }
-    const enabledRoles = ROLE_LIST_ORDER.filter((role) => ({
+    const presentRoles = ROLE_LIST_ORDER.filter((role) => (roleCounts.get(role) ?? 0) > 0 && ({
       citizen: true,
       mafia: true,
       don: settings.roles.don,
@@ -90,10 +91,10 @@ export function alivePlayersText(players: PlayerRow[], settings?: GameSettings):
       suicide: settings.roles.suicide,
       mistress: settings.roles.mistress
     } as Record<Role, boolean>)[role]);
-    const parts = enabledRoles.map((role) => {
+    const parts = presentRoles.map((role) => {
       const count = roleCounts.get(role) ?? 0;
       const base = `${ROLES[role].emoji} ${roleListTitle(role)}`;
-      return count > 1 ? `${base} — ${count}` : base;
+      return count > 1 ? `${base} - ${count}` : base;
     });
     lines.push(
       "",
@@ -102,7 +103,7 @@ export function alivePlayersText(players: PlayerRow[], settings?: GameSettings):
       "",
       `Всего: ${players.length} чел.`
     );
-  } else {
+  } else if (showTotal) {
     lines.push("", `Всего: <b>${players.length}</b>`);
   }
 

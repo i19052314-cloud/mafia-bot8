@@ -23,7 +23,7 @@ export function defaultGameSettings(): GameSettings {
   return {
     minPlayers,
     maxPlayers: integer("MAX_PLAYERS", 30, minPlayers, 50),
-    nightSeconds: integer("NIGHT_SECONDS", 45, 10, 3600),
+    nightSeconds: integer("NIGHT_SECONDS", 30, 10, 3600),
     daySeconds: integer("DAY_SECONDS", 60, 10, 3600),
     nominationSeconds: integer("NOMINATION_SECONDS", 30, 10, 600),
     voteSeconds: integer("VOTE_SECONDS", 30, 10, 600),
@@ -34,7 +34,7 @@ export function defaultGameSettings(): GameSettings {
     commissionerCanShoot: boolean("COMMISSIONER_CAN_SHOOT", false),
     allowSelfVote: boolean("ALLOW_SELF_VOTE", false),
     allowSkipVote: boolean("ALLOW_SKIP_VOTE", true),
-    nominationsEnabled: boolean("NOMINATIONS_ENABLED", true),
+    nominationsEnabled: boolean("NOMINATIONS_ENABLED", false),
     afkLimit: integer("AFK_LIMIT", 2, 0, 10),
     autoDeleteMessages: boolean("AUTO_DELETE_MESSAGES", false),
     friendlyFire: boolean("FRIENDLY_FIRE", false),

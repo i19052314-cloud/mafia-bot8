@@ -68,6 +68,7 @@ export class GameEngine {
   private readonly voteCandidates = new Map<number, PlayerRow[]>();
   private readonly judgeVotes = new Map<number, Map<string, "yes" | "no">>();
   private readonly judgeMessageId = new Map<number, number>();
+  private readonly nightFlavorPosted = new Map<number, Set<string>>();
 
   constructor(
     private readonly bot: Telegraf<Context>,
@@ -277,12 +278,16 @@ export class GameEngine {
 
       const running = (await this.db.getGame(game.id))!;
       await this.cleanupPhaseMessages(running);
-      await this.sendPhaseMedia(running, "night", `🌃 <b>Ночь 1</b> · город засыпает`);
       await this.sendTracked(running, [
-        "Активные роли делают выбор в личных сообщениях.",
-        `⏳ На действия: <b>${game.settings.nightSeconds} сек.</b>`,
+        "<b>Игра начинается!</b>",
         "",
-        alivePlayersText(assignedPlayers, game.settings)
+        "В течение нескольких секунд бот пришлёт вам личное сообщение с ролью и её описанием."
+      ].join("\n"));
+      await this.sendPhaseMedia(running, "night", `🌃 <b>Наступает ночь</b>\nНа улицы города выходят лишь самые отважные и бесстрашные. Утром попробуем сосчитать их головы...`);
+      await this.sendTracked(running, [
+        alivePlayersText(assignedPlayers, undefined, false),
+        "",
+        `Спать осталось <b>${game.settings.nightSeconds} сек.</b>`
       ].join("\n"), this.openBotKeyboard());
       await this.sendNightPrompts(game.id);
       const endsAt = Date.now() + game.settings.nightSeconds * 1000;
@@ -365,11 +370,12 @@ export class GameEngine {
       await this.db.recordAction(game.id, game.day, actor.user_id, type, target.user_id);
     }
 
+    await this.postNightFlavor(game, type);
     await safeAnswerCallback(ctx, `Вы выбрали: ${plainPlayerName(target)}`);
     if (type === "don_check") {
       await ctx.reply(target.role === "commissar"
-        ? `🎯 ${playerName(target)} — это Комиссар.`
-        : `❌ ${playerName(target)} — не Комиссар.`, privateHtml());
+        ? `🎯 ${playerName(target)} — это Комиссар Каттани.`
+        : `❌ ${playerName(target)} — не Комиссар Каттани.`, privateHtml());
     } else if (type === "commissar_check") {
       const defendedByLawyer = await this.lawyerDefended(game.id, game.day, target.user_id);
       const mafia = !defendedByLawyer && isMafiaTeam(target.role);
@@ -508,8 +514,8 @@ export class GameEngine {
     await safeAnswerCallback(ctx, "Голос принят");
     const targetText = targetId === "skip" ? "пропуск голосования" : mention(target!);
     await this.sendTracked(game, oldVote
-      ? `${mention(voter)} изменил(а) голос: ${targetText}`
-      : `${mention(voter)} проголосовал(а) за ${targetText}`);
+      ? `${mention(voter)} изменил голос: ${targetText}`
+      : `${mention(voter)} проголосовал за ${targetText}`);
     await this.updateVoteCounters(game.id, game.day);
   }
 
@@ -1214,6 +1220,7 @@ export class GameEngine {
   }
 
   private clearVoteState(gameId: number): void {
+    this.nightFlavorPosted.delete(gameId);
     this.voteCandidates.delete(gameId);
     for (const key of this.voteMessages.keys()) {
       if (key.startsWith(`${gameId}:`)) this.voteMessages.delete(key);
@@ -1306,7 +1313,7 @@ export class GameEngine {
     await this.db.setPhase(game.id, "day", game.day, endsAt);
     const current = (await this.db.getGame(game.id))!;
     await this.cleanupPhaseMessages(current);
-    await this.sendPhaseMedia(current, "day", `🌇 <b>День ${game.day}</b> · город просыпается`);
+    await this.sendPhaseMedia(current, "day", `🏙 <b>День ${game.day}</b>\nСолнце всходит, подсушивая на тротуарах пролитую ночью кровь...`);
     await this.sendMorningSummary(current, killed, afkSet, savedCount, mafiaTarget, mafiaVotes.length, revengeSet, players, performedActions);
     await this.sendTracked(current, [alivePlayersText(await this.db.getPlayers(game.id, true), game.settings), "", "Сейчас самое время обсудить результаты ночи, разобраться в причинах и следствиях..."].join("\n"));
     this.schedulePhase(game.id, endsAt);
@@ -1336,8 +1343,8 @@ export class GameEngine {
       await this.sendTracked(game, `💤 ${mention(player)} выбыл(а) за бездействие${game.settings.revealDeadRoles && player.role ? ` — ${roleLabel(player.role)}` : ""}.`);
     }
 
-    if (savedCount) await this.sendTracked(game, "👨‍⚕️ Доктор предотвратил нападение.");
-    if (!mafiaTarget && mafiaVotes) await this.sendTracked(game, "🔪 Мафия не смогла договориться.");
+    if (savedCount) await this.sendTracked(game, "👨🏼‍⚕️ Доктор предотвратил нападение.");
+    if (!mafiaTarget && mafiaVotes) await this.sendTracked(game, "🤵🏻 Мафия не смогла договориться.");
   }
 
   private nightGuests(victim: PlayerRow, players: PlayerRow[], actions: ActionRow[]): PlayerRow[] {
@@ -1468,17 +1475,13 @@ export class GameEngine {
   }
 
   private async openVoting(game: GameRow, candidates: PlayerRow[]): Promise<void> {
-    const alive = await this.db.getPlayers(game.id, true);
     const endsAt = Date.now() + game.settings.voteSeconds * 1000;
     await this.db.setPhase(game.id, "vote", game.day, endsAt);
     const updated = (await this.db.getGame(game.id))!;
     await this.cleanupPhaseMessages(updated);
     await this.sendTracked(updated, [
-      "Пришло время определить и наказать виновных.",
-      `Голосование продлится ${game.settings.voteSeconds} секунд`,
-      "",
-      `Кандидаты: ${candidates.map((player) => mention(player)).join(", ")}`,
-      `Голосуют <b>${alive.length}</b> живых игроков.`
+      "<b>Пришло время определить и наказать виноватых.</b>",
+      `Голосование продлится ${game.settings.voteSeconds} секунд`
     ].join("\n"), this.voteFromGroupKeyboard());
     this.voteCandidates.set(game.id, candidates);
     await this.sendVotePrompts(updated, candidates);
@@ -1491,7 +1494,7 @@ export class GameEngine {
     for (const voter of alive) {
       try {
         const message = await this.bot.telegram.sendMessage(voter.user_id, [
-          "🔥 <b>Пришло время определить и наказать виновных.</b>",
+          "🔥 <b>Пришло время определить и наказать виноватых.</b>",
           "Выберите, кого вы хотите линчевать."
         ].join("\n"), {
           ...privateHtml(),
@@ -1701,8 +1704,12 @@ export class GameEngine {
         const current = await this.db.getGame(game.id);
         if (!current || current.phase !== "night" || current.day !== day) return;
         await this.cleanupPhaseMessages(current);
-        await this.sendPhaseMedia(current, "night", `🌃 <b>Ночь ${day}</b> · город засыпает`);
-        await this.sendTracked(current, `Активные роли делают выбор в личных сообщениях. На действия: <b>${game.settings.nightSeconds} сек.</b>`, this.openBotKeyboard());
+        await this.sendPhaseMedia(current, "night", `🌃 <b>Наступает ночь</b>\nНа улицы города выходят лишь самые отважные и бесстрашные. Утром попробуем сосчитать их головы...`);
+        await this.sendTracked(current, [
+          alivePlayersText(await this.db.getPlayers(game.id, true), undefined, false),
+          "",
+          `Спать осталось <b>${game.settings.nightSeconds} сек.</b>`
+        ].join("\n"), this.openBotKeyboard());
         await this.sendNightPrompts(game.id);
       })().catch((error) => this.logger.error(`Не удалось начать ночь ${day}`, error));
     }, delayMs));
@@ -1767,6 +1774,20 @@ export class GameEngine {
     }
   }
 
+  private async postNightFlavor(game: GameRow, type: ActionType): Promise<void> {
+    const line = nightGroupFlavor(type);
+    if (!line) return;
+    const key = `${game.day}:${type}`;
+    let posted = this.nightFlavorPosted.get(game.id);
+    if (!posted) {
+      posted = new Set();
+      this.nightFlavorPosted.set(game.id, posted);
+    }
+    if (posted.has(key)) return;
+    posted.add(key);
+    await this.sendTracked(game, line);
+  }
+
   private async sendTracked(game: GameRow, text: string, replyMarkup?: InlineKeyboardMarkup): Promise<void> {
     try {
       const message = await this.bot.telegram.sendMessage(game.chat_id, text, {
@@ -1781,7 +1802,11 @@ export class GameEngine {
 
   private async sendPhaseMedia(game: GameRow, phase: "night" | "day", caption: string): Promise<void> {
     const message = await this.media.send(game.chat_id, phase, caption);
-    if (message && game.settings.autoDeleteMessages) await this.db.recordGameMessage(game.id, game.chat_id, message.message_id);
+    if (message) {
+      if (game.settings.autoDeleteMessages) await this.db.recordGameMessage(game.id, game.chat_id, message.message_id);
+    } else {
+      await this.sendTracked(game, caption);
+    }
   }
 
   private async cleanupPhaseMessages(game: GameRow): Promise<void> {
@@ -1828,6 +1853,21 @@ function nightFlavorIntro(type: ActionType, actor: PlayerRow): string {
     case "bum_visit": return `🍾 <b>Бомж</b> отправился в гости…`;
     case "lawyer_defend": return `🎩 <b>Адвокат</b> готовит алиби своему подзащитному…`;
     case "mistress_visit": return `💋 <b>Любовница</b> выбирает, кого навестить этой ночью…`;
+  }
+}
+
+function nightGroupFlavor(type: ActionType): string | null {
+  switch (type) {
+    case "mafia_kill": return `<b>🤵🏻 Мафия</b> выбрала жертву...`;
+    case "don_check": return `<b>🤵🏻 Дон</b> отправился на поиски Комиссара...`;
+    case "commissar_check": return `<b>🕵️ Комиссар Каттани</b> уже зарядил свой пистолет...`;
+    case "commissar_shoot": return `<b>🔫 Комиссар Каттани</b> уже взял цель на мушку...`;
+    case "doctor_heal": return `<b>👨🏼‍⚕️ Доктор</b> вышел на ночное дежурство...`;
+    case "maniac_kill": return `<b>🪓 Маньяк</b> выбрал жертву...`;
+    case "bum_visit": return `<b>🧙🏼‍♂️ Бомж</b> пошёл к кому-то за бутылкой...`;
+    case "lawyer_defend": return `<b>🎩 Адвокат</b> подготовил алиби...`;
+    case "mistress_visit": return `<b>💋 Любовница</b> отправилась в гости...`;
+    default: return null;
   }
 }
 
