@@ -26,7 +26,7 @@ export function defaultGameSettings(): GameSettings {
     nightSeconds: integer("NIGHT_SECONDS", 30, 10, 3600),
     daySeconds: integer("DAY_SECONDS", 60, 10, 3600),
     voteSeconds: integer("VOTE_SECONDS", 30, 10, 600),
-    lastWordSeconds: integer("LAST_WORD_SECONDS", 15, 0, 300),
+    lastWordSeconds: integer("LAST_WORD_SECONDS", 0, 0, 300),
     judgeSeconds: integer("JUDGE_SECONDS", 30, 10, 600),
     revealDeadRoles: boolean("REVEAL_DEAD_ROLES", true),
     doctorSelfHeal: boolean("DOCTOR_SELF_HEAL", true),

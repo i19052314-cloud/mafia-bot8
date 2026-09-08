@@ -506,6 +506,29 @@ export class GameDatabase {
     return normalizeProfile(result.rows[0]);
   }
 
+  async changeGems(user: TelegramUserData, delta: number): Promise<{ ok: boolean; profile: UserProfile }> {
+    return this.transaction(async (client) => {
+      await client.query(`
+        INSERT INTO user_economy (user_id, username, first_name, updated_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT(user_id) DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name
+      `, [user.id, user.username ?? null, user.firstName, Date.now()]);
+
+      const current = await client.query(
+        "SELECT user_id, money, gems, protection, documents, active_role FROM user_economy WHERE user_id = $1 FOR UPDATE",
+        [user.id]
+      );
+      const profile = normalizeProfile(current.rows[0]);
+      if (profile.gems + delta < 0) return { ok: false, profile };
+
+      const result = await client.query(`
+        UPDATE user_economy SET gems = gems + $1, updated_at = $2 WHERE user_id = $3
+        RETURNING user_id, money, gems, protection, documents, active_role
+      `, [delta, Date.now(), user.id]);
+      return { ok: true, profile: normalizeProfile(result.rows[0]) };
+    });
+  }
+
   async buyShopItem(user: TelegramUserData, item: ShopItem, price: number, currency: Currency): Promise<{ ok: boolean; profile: UserProfile }> {
     const balanceColumn = currency === "gems" ? "gems" : "money";
     return this.transaction(async (client) => {

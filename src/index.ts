@@ -22,6 +22,10 @@ async function main(): Promise<void> {
   bot.use(rateLimitMiddleware());
 
   bot.start(async (ctx) => {
+    if (ctx.chat && ctx.chat.type !== "private") {
+      await engine.beginFromGroup(ctx);
+      return;
+    }
     const joinMatch = /^join_(\d+)$/.exec(ctx.startPayload ?? "");
     if (joinMatch) {
       await engine.joinFromPrivate(ctx, Number(joinMatch[1]));
@@ -33,9 +37,9 @@ async function main(): Promise<void> {
       "Я провожу игру в Мафию: раздаю тайные роли, принимаю ночные действия и веду голосование.",
       "",
       "1. Добавьте меня в группу.",
-      "2. Отправьте /newgame.",
+      "2. Отправьте /game.",
       "3. Игроки нажимают «Присоединиться».",
-      "4. Ведущий нажимает «Начать игру».",
+      "4. Ведущий завершает регистрацию: /start.",
       "",
       "Справка: /help · Конфиденциальность: /privacy"
     ].join("\n"), { parse_mode: "HTML" });
@@ -55,7 +59,7 @@ async function main(): Promise<void> {
   bot.command("join", (ctx) => engine.sendJoinButton(ctx));
   bot.command("leave", (ctx) => engine.leaveGame(ctx));
   bot.command("players", (ctx) => engine.showPlayers(ctx));
-  bot.command("stopgame", (ctx) => engine.stopGame(ctx));
+  bot.command(["stop", "stopgame"], (ctx) => engine.stopGame(ctx));
   bot.command("pause", (ctx) => engine.pauseGame(ctx));
   bot.command("resume", (ctx) => engine.resumeGame(ctx));
   bot.command("extend", (ctx) => engine.extendGame(ctx, parseNumberArgument(ctx, 30)));
@@ -71,20 +75,14 @@ async function main(): Promise<void> {
   bot.command("mafia", (ctx) => engine.relayMafiaMessage(ctx, commandArgument(ctx)));
   bot.command("deleteme", (ctx) => engine.deleteMyData(ctx));
   bot.command("report", (ctx) => engine.sendReport(ctx, commandArgument(ctx)));
-  bot.command("give", (ctx) => engine.giveCurrency(ctx, commandArgument(ctx)));
+  bot.command("give", (ctx) => engine.giveawayDiamonds(ctx, commandArgument(ctx)));
+  bot.command("grant", (ctx) => engine.giveCurrency(ctx, commandArgument(ctx)));
+  bot.command("next", (ctx) => engine.announceNext(ctx, commandArgument(ctx)));
+  bot.command("balance", (ctx) => engine.showBalance(ctx));
+  bot.command("prolong", (ctx) => engine.prolongRent(ctx));
+  bot.command("share", (ctx) => engine.shareBot(ctx));
 
-  bot.command("begin", async (ctx) => {
-    if (!ctx.chat || ctx.chat.type === "private") {
-      await ctx.reply("Команда работает в игровой группе.");
-      return;
-    }
-    const game = await db.getActiveGameByChat(String(ctx.chat.id));
-    if (!game || game.status !== "lobby") {
-      await ctx.reply("Активного набора нет.");
-      return;
-    }
-    await engine.beginGame(ctx, game.id);
-  });
+  bot.command("begin", (ctx) => engine.beginFromGroup(ctx));
 
   bot.command("rules", async (ctx) => {
     await ctx.reply([
@@ -124,33 +122,28 @@ async function main(): Promise<void> {
 
   bot.command("help", async (ctx) => {
     await ctx.reply([
-      "🛠 <b>Команды Mafia Noir</b>",
-      "/newgame — открыть набор",
-      "/join — кнопка присоединения",
-      "/leave — выйти из набора или игры",
-      "/begin — начать игру",
-      "/players — игроки",
-      "/settings — правила группы",
-      "/adminlog — журнал действий администраторов",
-      "/pause, /resume — пауза и продолжение",
-      "/extend 30 — продлить фазу",
-      "/nextphase — завершить текущую фазу",
-      "/kick — исключить игрока ответом на сообщение",
-      "/transfer — передать ведущего ответом",
-      "/stopgame — отменить игру",
-      "/mafia текст — тайный чат мафии в личке",
-      "/stats, /top — статистика и рейтинг",
-      "/profile — игровой профиль",
-      "/shop — магазин",
-      "/rules — правила",
-      "/report текст — написать владельцу",
-      "/privacy, /deleteme — данные пользователя",
+      "🛠 <b>Команды</b>",
+      "/game — запустить новую игру",
+      "/extend — продлить регистрацию",
+      "/start — завершить регистрацию",
+      "/stop — отменить регистрацию",
+      "/leave — выйти из игры",
+      "/next — сообщить о следующей игре",
+      "/top — рейтинг",
+      "/balance — баланс",
+      "/prolong — продлить аренду",
+      "/give — передать алмазы в чат",
+      "/share — пригласить друзей",
+      "/help — помощь",
+      "",
+      "Дополнительно: /join, /players, /settings, /rules, /profile, /shop, /stats",
       "",
       "Команды управления доступны ведущему и администраторам."
     ].join("\n"), { parse_mode: "HTML" });
   });
 
   bot.action(/^leave:(\d+)$/, (ctx) => engine.leaveLobby(ctx, Number(ctx.match[1])));
+  bot.action(/^gw:([A-Za-z0-9]+)$/, (ctx) => engine.claimGiveaway(ctx, ctx.match[1]!));
   bot.action(/^refresh:(\d+)$/, (ctx) => engine.refreshLobby(ctx, Number(ctx.match[1])));
   bot.action(/^begin:(\d+)$/, (ctx) => engine.beginGame(ctx, Number(ctx.match[1])));
   bot.action(/^cfg:([a-z_]+)$/, (ctx) => engine.handleSetting(ctx, ctx.match[1]!));
@@ -186,23 +179,18 @@ async function main(): Promise<void> {
   await bot.telegram.setMyDescription("Mafia Noir проводит полноценную игру в группах: тайные роли, ночные действия, голосование, AFK-контроль и статистика.", "ru");
   await bot.telegram.setMyShortDescription("Кинематографичная Мафия для групповых чатов.", "ru");
   await bot.telegram.setMyCommands([
-    { command: "newgame", description: "Открыть набор" },
-    { command: "join", description: "Присоединиться" },
-    { command: "begin", description: "Начать игру" },
-    { command: "players", description: "Игроки" },
-    { command: "settings", description: "Настройки группы" },
-    { command: "adminlog", description: "Журнал администраторов" },
-    { command: "pause", description: "Поставить на паузу" },
-    { command: "resume", description: "Продолжить игру" },
-    { command: "extend", description: "Продлить текущую фазу" },
-    { command: "rules", description: "Правила и роли" },
-    { command: "stats", description: "Моя статистика" },
-    { command: "top", description: "Рейтинг игроков" },
-    { command: "profile", description: "Игровой профиль" },
-    { command: "shop", description: "Магазин" },
-    { command: "report", description: "Сообщить о проблеме" },
-    { command: "privacy", description: "Конфиденциальность" },
-    { command: "help", description: "Все команды" }
+    { command: "game", description: "Запустить новую игру" },
+    { command: "extend", description: "Продлить регистрацию" },
+    { command: "start", description: "Завершить регистрацию" },
+    { command: "stop", description: "Отменить регистрацию" },
+    { command: "leave", description: "Выйти из игры" },
+    { command: "next", description: "Сообщить о следующей игре" },
+    { command: "top", description: "Рейтинг" },
+    { command: "balance", description: "Баланс" },
+    { command: "prolong", description: "Продлить аренду" },
+    { command: "give", description: "Передать алмазы в чат" },
+    { command: "share", description: "Пригласить друзей" },
+    { command: "help", description: "Помощь" }
   ]);
 
   const shutdown = async (signal: string): Promise<void> => {

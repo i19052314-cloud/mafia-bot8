@@ -69,6 +69,7 @@ export class GameEngine {
   private readonly judgeVotes = new Map<number, Map<string, "yes" | "no">>();
   private readonly judgeMessageId = new Map<number, number>();
   private readonly nightFlavorPosted = new Map<number, Set<string>>();
+  private readonly giveaways = new Map<string, { chatId: string; giverId: string; amount: number; messageId: number; createdAt: number }>();
 
   constructor(
     private readonly bot: Telegraf<Context>,
@@ -113,7 +114,7 @@ export class GameEngine {
     }
     const game = await this.db.getActiveGameByChat(String(ctx.chat.id));
     if (!game || game.status !== "lobby") {
-      await ctx.reply("Сейчас набора нет. Создайте его командой /newgame.");
+      await ctx.reply("Сейчас набора нет. Создайте его командой /game.");
       return;
     }
     await ctx.reply("Откройте бота, чтобы получать тайную роль и ночные действия:", {
@@ -272,7 +273,7 @@ export class GameEngine {
       } catch (error) {
         this.logger.error("Не удалось раздать роли", error);
         await this.db.cancelGame(game.id);
-        await this.bot.telegram.sendMessage(game.chat_id, "Игра отменена: одному из игроков не удалось доставить роль. Создайте новый набор командой /newgame.");
+        await this.bot.telegram.sendMessage(game.chat_id, "Игра отменена: одному из игроков не удалось доставить роль. Создайте новый набор командой /game.");
         return;
       }
 
@@ -296,6 +297,19 @@ export class GameEngine {
     } finally {
       this.startingGames.delete(game.id);
     }
+  }
+
+  async beginFromGroup(ctx: Context): Promise<void> {
+    if (!ctx.chat || ctx.chat.type === "private") {
+      await ctx.reply("Команда работает в игровой группе.");
+      return;
+    }
+    const game = await this.db.getActiveGameByChat(String(ctx.chat.id));
+    if (!game || game.status !== "lobby") {
+      await ctx.reply("Активного набора нет.");
+      return;
+    }
+    await this.beginGame(ctx, game.id);
   }
 
   async handleNightAction(ctx: Context, gameId: number, actionDay: number, type: ActionType, targetId: string): Promise<void> {
@@ -516,7 +530,7 @@ export class GameEngine {
     }
     const game = await this.db.getActiveGameByChat(String(ctx.chat.id));
     if (!game) {
-      await ctx.reply("Активной игры нет. Создайте её командой /newgame.");
+      await ctx.reply("Активной игры нет. Создайте её командой /game.");
       return;
     }
     const players = await this.db.getPlayers(game.id, game.status === "running");
@@ -536,7 +550,7 @@ export class GameEngine {
     this.clearVoteState(game.id);
     await this.db.cancelGame(game.id);
     await this.db.recordAudit(game.chat_id, game.id, String(ctx.from.id), "stop_game");
-    await ctx.reply("🛑 Игра отменена. Новый набор: /newgame");
+    await ctx.reply("🛑 Игра отменена. Новый набор: /game");
   }
 
   async pauseGame(ctx: Context): Promise<void> {
@@ -580,6 +594,10 @@ export class GameEngine {
     if (!game || !ctx.from) return;
     if (!(await this.canManage(game, ctx.from.id))) {
       await ctx.reply("Продлить фазу может создатель или администратор.");
+      return;
+    }
+    if (game.status === "lobby") {
+      await ctx.reply("⏳ Регистрация идёт без ограничения по времени. Завершить её: /start");
       return;
     }
     if (game.phase === "paused" || !game.phase_ends_at) {
@@ -742,7 +760,7 @@ export class GameEngine {
     if (!targetUser) {
       const ref = tokens[0];
       if (!ref) {
-        await ctx.reply("Использование: /give @username money 500 (или ответьте на сообщение игрока)");
+        await ctx.reply("Использование: /grant @username money 500 (или ответьте на сообщение игрока)");
         return;
       }
       const found = await this.db.findUserByRef(ref);
@@ -757,7 +775,7 @@ export class GameEngine {
     const currencyToken = rest[0]?.toLowerCase();
     const amount = Number(rest[1]);
     if ((currencyToken !== "money" && currencyToken !== "gems") || !Number.isInteger(amount) || amount <= 0 || amount > 10_000_000) {
-      await ctx.reply("Использование: /give @username money 500 (или gems). Сумма — целое число от 1 до 10 000 000.");
+      await ctx.reply("Использование: /grant @username money 500 (или gems). Сумма — целое число от 1 до 10 000 000.");
       return;
     }
     const currency: Currency = currencyToken === "gems" ? "gems" : "money";
@@ -770,6 +788,101 @@ export class GameEngine {
       `Текущий баланс: 💵 <b>${profile.money}</b> · 💎 <b>${profile.gems}</b>`,
       { parse_mode: "HTML" }
     );
+  }
+
+  async showBalance(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    const profile = await this.db.getProfile(userData(ctx.from));
+    const displayName = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
+    await ctx.reply(
+      `💰 <b>Баланс ${escapeHtml(displayName)}</b>\n\n💵 Монеты: <b>${profile.money}</b>\n💎 Алмазы: <b>${profile.gems}</b>`,
+      { parse_mode: "HTML" }
+    );
+  }
+
+  async announceNext(ctx: Context, rawText: string): Promise<void> {
+    if (!ctx.chat || ctx.chat.type === "private") {
+      await ctx.reply("Команда работает в игровой группе.");
+      return;
+    }
+    const text = rawText.trim().slice(0, 500) || "Сбор скоро откроется. Новая игра: /game";
+    await ctx.reply(`📢 <b>Следующая игра</b>\n\n${escapeHtml(text)}`, { parse_mode: "HTML" });
+  }
+
+  async prolongRent(ctx: Context): Promise<void> {
+    const contact = this.config.supportUsername ? `@${this.config.supportUsername}` : this.config.privacyContact;
+    await ctx.reply(
+      `🏠 <b>Аренда бота</b>\n\nДля продления аренды напишите: ${escapeHtml(contact)}`,
+      { parse_mode: "HTML" }
+    );
+  }
+
+  async shareBot(ctx: Context): Promise<void> {
+    const botLink = `https://t.me/${this.botUsername}`;
+    const shareLink = `https://t.me/share/url?url=${encodeURIComponent(botLink)}&text=${encodeURIComponent("Играем в Мафию! Присоединяйся.")}`;
+    await ctx.reply("👥 <b>Пригласи друзей в Мафию!</b>\n\nОтправь им ссылку на бота или поделись в чате.", {
+      parse_mode: "HTML",
+      reply_markup: Markup.inlineKeyboard([
+        Markup.button.url("🤖 Открыть бота", botLink),
+        Markup.button.url("📣 Поделиться", shareLink)
+      ]).reply_markup
+    });
+  }
+
+  async giveawayDiamonds(ctx: Context, rawText: string): Promise<void> {
+    if (!ctx.from) return;
+    if (!ctx.chat || ctx.chat.type === "private") {
+      await ctx.reply("Команда работает в игровой группе.");
+      return;
+    }
+    const amount = Number((rawText.trim().split(/\s+/)[0] ?? ""));
+    if (!Number.isInteger(amount) || amount < 1 || amount > 1_000_000) {
+      await ctx.reply("Использование: /give 100 — передать 100 💎 в чат. Первый нажавший «Забрать» получит их.");
+      return;
+    }
+    const giver = userData(ctx.from);
+    const { ok, profile } = await this.db.changeGems(giver, -amount);
+    if (!ok) {
+      await ctx.reply(`Недостаточно алмазов. Ваш баланс: 💎 <b>${profile.gems}</b> (/balance)`, { parse_mode: "HTML" });
+      return;
+    }
+    const now = Date.now();
+    if (this.giveaways.size > 200) {
+      for (const [key, value] of this.giveaways) {
+        if (now - value.createdAt > 24 * 3600 * 1000) this.giveaways.delete(key);
+      }
+    }
+    const id = now.toString(36) + Math.floor(Math.random() * 0xffffff).toString(36);
+    const giverMention = mention({ user_id: giver.id, username: giver.username ?? null, first_name: giver.firstName });
+    try {
+      const message = await ctx.reply(`💎 ${giverMention} разбрасывает <b>${amount}</b> 💎!\n\nПервый нажавший забирает всё.`, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([Markup.button.callback("🎁 Забрать", `gw:${id}`)]).reply_markup
+      });
+      this.giveaways.set(id, { chatId: String(ctx.chat.id), giverId: giver.id, amount, messageId: message.message_id, createdAt: now });
+    } catch {
+      await this.db.changeGems(giver, amount);
+      await ctx.reply("Не удалось создать раздачу. Алмазы возвращены.");
+    }
+  }
+
+  async claimGiveaway(ctx: Context, id: string): Promise<void> {
+    const entry = this.giveaways.get(id);
+    if (!entry || !ctx.from) {
+      await safeAnswerCallback(ctx, "Раздача уже завершена", true);
+      return;
+    }
+    if (String(ctx.from.id) === entry.giverId) {
+      await safeAnswerCallback(ctx, "Нельзя забрать свои же алмазы", true);
+      return;
+    }
+    this.giveaways.delete(id);
+    await this.db.grantCurrency(userData(ctx.from), "gems", entry.amount);
+    const claimerMention = mention({ user_id: String(ctx.from.id), username: ctx.from.username ?? null, first_name: ctx.from.first_name });
+    await safeAnswerCallback(ctx, "Алмазы ваши!");
+    try {
+      await ctx.editMessageText(`🎁 ${claimerMention} забрал <b>${entry.amount}</b> 💎!`, { parse_mode: "HTML" });
+    } catch { /* message deleted or too old */ }
   }
 
   private async replyOrEdit(ctx: Context, text: string, keyboard: InlineKeyboardMarkup): Promise<void> {
@@ -1463,12 +1576,19 @@ export class GameEngine {
     const voters = new Set(votes.map((vote) => vote.voter_id));
     const blocked = nightBlockedUsers(await this.db.getActions(game.id, game.day), await this.db.getPlayers(game.id));
     const hanged: PlayerRow[] = [];
-    for (const player of alive) {
-      if (blocked.has(player.user_id)) continue;
-      if (voters.has(player.user_id)) continue;
-      hanged.push(player);
+    if (game.settings.afkLimit > 0) {
+      for (const player of alive) {
+        if (blocked.has(player.user_id)) continue;
+        if (voters.has(player.user_id)) {
+          if (player.afk_strikes > 0) await this.db.setAfkStrikes(game.id, player.user_id, 0);
+          continue;
+        }
+        const strikes = player.afk_strikes + 1;
+        await this.db.setAfkStrikes(game.id, player.user_id, strikes);
+        if (strikes >= game.settings.afkLimit) hanged.push(player);
+      }
+      if (hanged.length) await this.db.killPlayers(game.id, hanged.map((player) => player.user_id));
     }
-    if (hanged.length) await this.db.killPlayers(game.id, hanged.map((player) => player.user_id));
 
     const aliveAfter = await this.db.getPlayers(game.id, true);
     const afterIds = new Set(aliveAfter.map((player) => player.user_id));
@@ -1478,24 +1598,27 @@ export class GameEngine {
       ? aliveAfter.find((player) => player.user_id === selected)
       : undefined;
     await this.cleanupPhaseMessages(game);
-    const lines = ["⚖️ <b>Голосование окончено</b>"];
-    if (!selected || selected === "skip") {
-      lines.push(!validVotes.length ? "Никто не проголосовал." : selected === "skip" ? "Город решил никого не изгонять." : "Голоса разделились. Никто не изгнан.");
-    } else if (!selectedPlayer) {
-      lines.push("Выбранный кандидат уже покинул город.");
-    } else {
-      lines.push(`${mention(selectedPlayer)} получает большинство голосов.`);
-    }
-    for (const player of hanged) {
-      lines.push(eliminationDeathLine(player, game.settings.revealDeadRoles));
-    }
-    await this.sendTracked(game, lines.join("\n"));
-
     if (!selectedPlayer) {
+      const lines = ["⚖️ <b>Голосование окончено</b>"];
+      if (!selected || selected === "skip") {
+        if (!votes.length) lines.push("Никто не проголосовал.");
+        else if (!validVotes.length) lines.push("Все поданные голоса ушли в пустоту: кандидаты уже покинули город.");
+        else if (selected === "skip") lines.push("Город решил никого не изгонять.");
+        else lines.push("Голоса разделились. Никто не изгнан.");
+      } else {
+        lines.push("Выбранный кандидат уже покинул город.");
+      }
+      for (const player of hanged) {
+        lines.push(eliminationDeathLine(player, game.settings.revealDeadRoles));
+      }
+      await this.sendTracked(game, lines.join("\n"));
       const winnerAfter = determineWinner(await this.db.getPlayers(game.id, true));
       if (winnerAfter) await this.finishGame(game, winnerAfter);
       else await this.startNextNight(game.id, game.day + 1);
       return;
+    }
+    if (hanged.length) {
+      await this.sendTracked(game, hanged.map((player) => eliminationDeathLine(player, game.settings.revealDeadRoles)).join("\n"));
     }
     await this.db.setPendingElimination(game.id, selectedPlayer.user_id);
     if (game.settings.lastWordSeconds > 0) {
@@ -1532,7 +1655,7 @@ export class GameEngine {
     await this.cleanupPhaseMessages(updated);
     try {
       const message = await this.bot.telegram.sendMessage(updated.chat_id,
-        `Вы точно хотите линчевать ${mention(candidate)}?`,
+        `Вы точно хотите линчевать ${mention(candidate)}?\n\nГолосование завершено`,
         { parse_mode: "HTML", reply_markup: judgeKeyboard(game.id, game.day, { yes: 0, no: 0 }) });
       this.judgeMessageId.set(game.id, message.message_id);
     } catch (error) {
@@ -1569,16 +1692,22 @@ export class GameEngine {
     const candidate = current.pending_elimination_id ? await this.db.getPlayer(game.id, current.pending_elimination_id) : undefined;
     await this.cleanupPhaseMessages(game);
 
+    const resultsHeader = `<b>Результаты голосования:</b>\n${yes} 👍 | ${no} 👎`;
     if (!candidate?.alive || no >= yes) {
       await this.db.setPendingElimination(game.id, null);
-      await this.sendTracked(game, yes === 0 && no === 0
-        ? "Город не смог договориться о казни. Никто не изгнан."
-        : "Город пощадил подсудимого. Никто не изгнан.");
+      await this.sendTracked(game, [
+        resultsHeader,
+        "",
+        yes === 0 && no === 0
+          ? "Город не смог договориться о казни. Никто не изгнан."
+          : "Город пощадил подсудимого. Никто не изгнан."
+      ].join("\n"));
       const winner = determineWinner(await this.db.getPlayers(game.id, true));
       if (winner) await this.finishGame(game, winner);
       else await this.startNextNight(game.id, game.day + 1);
       return;
     }
+    await this.sendTracked(game, [resultsHeader, "", `Вешаем ${mention(candidate)}! :)`].join("\n"));
     await this.eliminateVotedPlayer(game, candidate);
   }
 
@@ -1596,11 +1725,12 @@ export class GameEngine {
     await this.db.killPlayers(game.id, [player.user_id, ...(revenge ? [revenge.user_id] : [])]);
     await this.db.setPendingElimination(game.id, null);
     await this.cleanupPhaseMessages(game);
-    const playerLine = eliminationDeathLine(player, game.settings.revealDeadRoles);
-    const revengeLine = revenge
-      ? `\n💣 Камикадзе утянул(а) с собой ${mention(revenge)}${game.settings.revealDeadRoles && revenge.role ? ` — ${roleLabel(revenge.role)}` : ""}.`
-      : "";
-    await this.sendTracked(game, playerLine + revengeLine);
+    if (game.settings.revealDeadRoles && player.role) {
+      await this.sendTracked(game, `${mention(player)} был ${roleLabel(player.role)}`);
+    }
+    if (revenge) {
+      await this.sendTracked(game, `💣 Камикадзе утянул(а) с собой ${mention(revenge)}${game.settings.revealDeadRoles && revenge.role ? ` — ${roleLabel(revenge.role)}` : ""}.`);
+    }
     const winner = determineWinner(await this.db.getPlayers(game.id, true));
     if (winner) await this.finishGame(game, winner);
     else await this.startNextNight(game.id, game.day + 1);
