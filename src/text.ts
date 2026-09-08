@@ -21,7 +21,7 @@ export function roleLabel(role: Role): string {
 
 export function roleDescription(role: Role): string {
   switch (role) {
-    case "citizen": return "Днём выдвигайте кандидатов, вычисляйте преступников и голосуйте. Ночью вы спите.";
+    case "citizen": return "Днём обсуждайте события, вычисляйте преступников и голосуйте. Ночью вы спите.";
     case "mafia": return "Ночью вместе с мафией выберите жертву. Для тайной связи используйте /mafia текст.";
     case "don": return "Вы глава мафии: участвуете в убийстве и можете искать Комиссара.";
     case "commissar": return "Каждую ночь проверяйте игрока. Если стрельба разрешена настройками, вместо проверки можно сделать выстрел.";
@@ -77,10 +77,9 @@ export function settingsText(settings: GameSettings): string {
     "⚙️ <b>Настройки игры</b>",
     "",
     `<b>Игроки:</b> ${settings.minPlayers}–${settings.maxPlayers}`,
-    `<b>Таймеры:</b> ночь ${settings.nightSeconds}с · день ${settings.daySeconds}с · кандидатуры ${settings.nominationSeconds}с · голосование ${settings.voteSeconds}с · последнее слово ${settings.lastWordSeconds}с`,
+    `<b>Таймеры:</b> ночь ${settings.nightSeconds}с · день ${settings.daySeconds}с · голосование ${settings.voteSeconds}с · последнее слово ${settings.lastWordSeconds}с`,
     `<b>Роли:</b> ${enabledRoles || "только Мафия и Мирные"}`,
     "",
-    `${flag(settings.nominationsEnabled)} Кандидатуры перед голосованием`,
     `${flag(settings.revealDeadRoles)} Раскрывать роли выбывших`,
     `${flag(settings.doctorSelfHeal)} Доктор может лечить себя`,
     `${flag(settings.commissionerCanShoot)} Комиссар может стрелять`,

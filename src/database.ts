@@ -6,7 +6,6 @@ import type {
   ActivePhase,
   GameRow,
   GameSettings,
-  NominationRow,
   Phase,
   PlayerRow,
   Role,
@@ -56,10 +55,10 @@ export class GameDatabase {
         chat_title TEXT NOT NULL DEFAULT '',
         host_id TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('lobby','running','finished','cancelled')),
-        phase TEXT NOT NULL CHECK (phase IN ('lobby','night','day','nomination','vote','last_word','paused','finished')),
+        phase TEXT NOT NULL CHECK (phase IN ('lobby','night','day','vote','last_word','paused','finished')),
         day INTEGER NOT NULL DEFAULT 0,
         phase_ends_at DOUBLE PRECISION,
-        paused_phase TEXT CHECK (paused_phase IS NULL OR paused_phase IN ('night','day','nomination','vote','last_word')),
+        paused_phase TEXT CHECK (paused_phase IS NULL OR paused_phase IN ('night','day','vote','last_word')),
         paused_remaining_ms DOUBLE PRECISION,
         pending_elimination_id TEXT,
         lobby_message_id INTEGER,
@@ -103,14 +102,8 @@ export class GameDatabase {
         PRIMARY KEY (game_id, day, voter_id)
       );
 
-      CREATE TABLE IF NOT EXISTS nominations (
-        game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
-        day INTEGER NOT NULL,
-        nominator_id TEXT NOT NULL,
-        target_id TEXT NOT NULL,
-        created_at DOUBLE PRECISION NOT NULL,
-        PRIMARY KEY (game_id, day, nominator_id)
-      );
+      -- Фаза выдвижения удалена: таблица nominations больше не используется.
+      DROP TABLE IF EXISTS nominations;
 
       CREATE TABLE IF NOT EXISTS game_messages (
         game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
@@ -378,19 +371,6 @@ export class GameDatabase {
     await this.pool.query("UPDATE game_players SET afk_strikes = $1 WHERE game_id = $2 AND user_id = $3", [strikes, gameId, userId]);
   }
 
-  async recordNomination(gameId: number, day: number, nominatorId: string, targetId: string): Promise<void> {
-    await this.pool.query(`
-      INSERT INTO nominations (game_id, day, nominator_id, target_id, created_at)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT(game_id, day, nominator_id) DO UPDATE SET target_id = EXCLUDED.target_id, created_at = EXCLUDED.created_at
-    `, [gameId, day, nominatorId, targetId, Date.now()]);
-  }
-
-  async getNominations(gameId: number, day: number): Promise<NominationRow[]> {
-    const result = await this.pool.query("SELECT * FROM nominations WHERE game_id = $1 AND day = $2", [gameId, day]);
-    return result.rows as NominationRow[];
-  }
-
   async recordVote(gameId: number, day: number, voterId: string, targetId: string): Promise<void> {
     await this.pool.query(`
       INSERT INTO votes (game_id, day, voter_id, target_id, created_at)
@@ -553,8 +533,6 @@ export class GameDatabase {
       await client.query("UPDATE actions SET target_id = $1 WHERE target_id = $2", [anonymousId, userId]);
       await client.query("UPDATE votes SET voter_id = $1 WHERE voter_id = $2", [anonymousId, userId]);
       await client.query("UPDATE votes SET target_id = $1 WHERE target_id = $2", [anonymousId, userId]);
-      await client.query("UPDATE nominations SET nominator_id = $1 WHERE nominator_id = $2", [anonymousId, userId]);
-      await client.query("UPDATE nominations SET target_id = $1 WHERE target_id = $2", [anonymousId, userId]);
       await client.query(`
         UPDATE game_players SET user_id = $1, username = NULL, first_name = 'Удалённый пользователь'
         WHERE user_id = $2

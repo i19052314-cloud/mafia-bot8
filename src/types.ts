@@ -11,7 +11,7 @@ export const ROLES = {
 export type Role = keyof typeof ROLES;
 export type Side = (typeof ROLES)[Role]["side"];
 export type GameStatus = "lobby" | "running" | "finished" | "cancelled";
-export type ActivePhase = "night" | "day" | "nomination" | "vote" | "last_word";
+export type ActivePhase = "night" | "day" | "vote" | "last_word";
 export type Phase = "lobby" | ActivePhase | "paused" | "finished";
 export type ActionType =
   | "mafia_kill"
@@ -36,7 +36,6 @@ export interface GameSettings {
   maxPlayers: number;
   nightSeconds: number;
   daySeconds: number;
-  nominationSeconds: number;
   voteSeconds: number;
   lastWordSeconds: number;
   revealDeadRoles: boolean;
@@ -44,7 +43,6 @@ export interface GameSettings {
   commissionerCanShoot: boolean;
   allowSelfVote: boolean;
   allowSkipVote: boolean;
-  nominationsEnabled: boolean;
   afkLimit: number;
   autoDeleteMessages: boolean;
   roles: RoleSettings;
@@ -93,14 +91,6 @@ export interface VoteRow {
   game_id: number;
   day: number;
   voter_id: string;
-  target_id: string;
-  created_at: number;
-}
-
-export interface NominationRow {
-  game_id: number;
-  day: number;
-  nominator_id: string;
   target_id: string;
   created_at: number;
 }
